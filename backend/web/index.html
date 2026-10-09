@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5ef">
+  <title>EcoRoute — plan your day</title>
+  <link rel="stylesheet" href="/app/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/app"><span class="brand-mark">e</span> EcoRoute</a>
+    <span class="top-note">Plan a day that works, with less backtracking.</span>
+  </header>
+  <main class="layout">
+    <section class="intro">
+      <p class="eyebrow">YOUR DAY, THOUGHT THROUGH</p>
+      <h1>Make room for<br><em>what matters.</em></h1>
+      <p class="intro-copy">Add your appointments and errands. EcoRoute checks your deadlines, estimates travel, and lays out a practical timeline for you to review.</p>
+      <div class="promise"><span>01</span><p><strong>Your deadlines stay in charge</strong><br>Fixed appointments and time windows are treated as constraints.</p></div>
+      <div class="promise"><span>02</span><p><strong>You stay in control</strong><br>Review the itinerary before saving it to your schedule.</p></div>
+      <p class="privacy-note">Travel estimates depend on your configured provider. Local development uses clearly identified estimates.</p>
+    </section>
+
+    <section class="planner-card" aria-labelledby="planner-heading">
+      <div class="card-heading"><div><p class="eyebrow">NEW ITINERARY</p><h2 id="planner-heading">Plan your day</h2></div><span class="step-pill">01 / DETAILS</span></div>
+      <form id="planner-form">
+        <div class="identity-row">
+          <label class="field grow">User ID <span>Use your Cognito subject in production</span><input id="user-id" required value="local-user" autocomplete="username"></label>
+          <label class="field">Bearer token <span>Optional in local development</span><input id="token" type="password" autocomplete="off" placeholder="Cognito ID or access token"></label>
+        </div>
+        <div class="field-row">
+          <label class="field">Date<input id="date" type="date" required></label>
+          <label class="field">Timezone<input id="timezone" required value="Asia/Kolkata"></label>
+        </div>
+        <div class="field-row">
+          <label class="field">Day starts<input id="start-time" type="time" required value="09:00"></label>
+          <label class="field">Day ends<input id="end-time" type="time" required value="18:00"></label>
+        </div>
+        <div class="field-row"><label class="field">Preferred travel mode<select id="travel-mode"><option>Walking</option><option>Bicycle</option><option>Car</option></select></label><div class="mode-note">Route time and distance are estimated for this mode.</div></div>
+        <div class="location-grid">
+          <div class="location-field"><label class="field">Start location<input id="start-query" placeholder="Search an address or place"></label><div class="search-results" id="start-results"></div><div class="selected-location" id="start-selected"></div><details class="coordinates"><summary>Enter coordinates manually</summary><div class="coordinate-fields"><input id="start-lat" type="number" step="any" min="-90" max="90" placeholder="Latitude"><input id="start-lon" type="number" step="any" min="-180" max="180" placeholder="Longitude"></div></details></div>
+          <div class="location-field"><label class="field">End location<input id="end-query" placeholder="Same as start, or search another place"></label><div class="search-results" id="end-results"></div><div class="selected-location" id="end-selected"></div><details class="coordinates"><summary>Enter coordinates manually</summary><div class="coordinate-fields"><input id="end-lat" type="number" step="any" min="-90" max="90" placeholder="Latitude"><input id="end-lon" type="number" step="any" min="-180" max="180" placeholder="Longitude"></div></details></div>
+        </div>
+        <div class="section-label"><div><h3>Appointments and errands</h3><p>Add a place, how long you need, and any deadline.</p></div><button id="add-stop" type="button" class="text-button">+ Add a stop</button></div>
+        <div id="stops" class="stops-list"></div>
+        <div class="form-actions"><button class="primary" id="preview-button" type="submit">Build my timeline <span>→</span></button><span class="action-hint">No schedule is saved until you choose save.</span></div>
+      </form>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    </section>
+
+    <section id="result" class="result-card" hidden>
+      <div class="result-heading"><div><p class="eyebrow">YOUR PROPOSED ROUTE</p><h2>Review your timeline</h2></div><span id="feasibility" class="status-pill"></span></div>
+      <div id="summary" class="summary-grid"></div>
+      <div id="conflicts" class="conflicts" hidden></div>
+      <ol id="timeline" class="timeline"></ol>
+      <div id="explanation" class="explanation"></div>
+      <div class="result-actions"><button id="save-button" class="primary" type="button">Save this schedule <span>→</span></button><span id="save-note" class="action-hint">Your schedule only changes when you save it.</span></div>
+    </section>
+    <section id="manage-card" class="manage-card" hidden>
+      <div class="result-heading"><div><p class="eyebrow">MAKE A CHANGE</p><h2>Ask EcoRoute</h2></div><span class="step-pill">REVIEW BEFORE SAVING</span></div>
+      <div class="field-row"><label class="field">Schedule ID<input id="manage-schedule-id" required placeholder="Paste an existing schedule ID"></label><label class="field">Request<input id="agent-request" required placeholder="e.g. Find a pharmacy near my route"></label></div>
+      <div class="manage-actions"><button id="ask-agent" class="primary" type="button">Find places or replan <span>→</span></button><span class="action-hint">The agent can search places; the planner checks deadlines and travel.</span></div>
+      <div id="agent-message" class="notice" role="status" aria-live="polite" hidden></div>
+      <div id="candidate-panel" hidden><h3 class="subheading">Choose a place to evaluate</h3><p class="small-note">Place listings do not confirm stock, prices, or opening hours.</p><div id="agent-candidates" class="candidate-list"></div></div>
+      <div id="proposal-panel" hidden><div class="proposal-head"><h3 class="subheading">Proposed itinerary</h3><span id="proposal-status" class="status-pill"></span></div><div id="proposal-summary" class="summary-grid"></div><div id="proposal-conflicts" class="conflicts" hidden></div><ol id="proposal-timeline" class="timeline"></ol><div id="proposal-facts" class="explanation"></div><div id="proposal-actions" class="result-actions"><button id="approve-proposal" class="primary" type="button">Approve change <span>→</span></button><button id="reject-proposal" class="secondary" type="button">Reject</button><span id="proposal-note" class="action-hint"></span></div></div>
+    </section>
+  </main>
+  <footer><span>EcoRoute</span><span>Place results don’t confirm stock, price, or opening hours.</span><a href="/docs">API docs ↗</a></footer>
+  <template id="stop-template">
+    <div class="stop-row">
+      <div class="stop-index"></div>
+      <div class="stop-content">
+        <div class="stop-title-row"><label class="field stop-search-label">Place or activity<input class="stop-query" required placeholder="e.g. pharmacy, pick up groceries"></label><button type="button" class="remove-stop" aria-label="Remove stop">×</button></div>
+        <div class="search-results stop-results"></div>
+        <div class="selected-location stop-selected"></div>
+        <details class="coordinates"><summary>Enter coordinates manually</summary><div class="coordinate-fields"><input class="stop-lat" type="number" step="any" min="-90" max="90" placeholder="Latitude"><input class="stop-lon" type="number" step="any" min="-180" max="180" placeholder="Longitude"></div></details>
+        <div class="stop-options"><label class="field">Activity type<select class="stop-type"><option value="errand">Errand</option><option value="appointment">Appointment</option><option value="meeting">Meeting</option><option value="class">Class</option><option value="other">Other</option></select></label><label class="field">Visit length (min)<input class="duration" type="number" min="1" max="1440" value="30" required></label><label class="field">Complete by<input class="deadline" type="time"></label><span class="check-field">Required stop</span></div>
+        <label class="check-field fixed-toggle"><input class="fixed-toggle-input" type="checkbox"> Fixed appointment time</label>
+        <label class="field fixed-time-wrap" hidden>Appointment starts at<input class="fixed-time" type="time"></label>
+      </div>
+    </div>
+  </template>
+  <script src="/app/app.js" defer></script>
+</body>
+</html>

@@ -1,11 +1,13 @@
 """Step Functions Lambda task handler for EcoRoute planning requests."""
 
 from typing import Any
+from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.integrations import parse_intent, search_places
+from app import models
+from app.integrations import infer_replan_updates, parse_intent, search_places
 from app.schemas import ReplanRequest
-from app.service import get_schedule, replan
+from app.service import get_schedule, replan, row_stop
 
 
 def run_action(event: dict[str, Any], db=None) -> dict[str, Any]:
@@ -39,7 +41,9 @@ def run_action(event: dict[str, Any], db=None) -> dict[str, Any]:
             }
 
         if action == "replan":
-            request = ReplanRequest(user_id=user_id, reason=event.get("request_text") or "User requested replanning")
+            rows=session.scalars(select(models.Stop).where(models.Stop.schedule_id==schedule_id).order_by(models.Stop.order_index)).all()
+            updates=infer_replan_updates(event.get("request_text", ""),[row_stop(row) for row in rows])
+            request = ReplanRequest(user_id=user_id, updates=updates, reason=event.get("request_text") or "User requested replanning")
             proposal = replan(session, schedule_id, request)
             return {
                 "id": proposal.id,
@@ -61,4 +65,10 @@ def run_action(event: dict[str, Any], db=None) -> dict[str, Any]:
 
 
 def lambda_handler(event: dict[str, Any], _context) -> dict[str, Any]:
+    if event.get("action") == "migrate":
+        from alembic import command
+        from alembic.config import Config
+
+        command.upgrade(Config("alembic.ini"), "head")
+        return {"status": "migrated"}
     return run_action(event)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from itertools import permutations
+from math import factorial
 from math import asin, cos, radians, sin, sqrt
 from typing import Any, Protocol
 
@@ -114,7 +116,7 @@ def validate(stops, start_at, end_at, start_location, end_location, provider, mo
             conflicts.append({"constraint_type": "opening_hours", "stop_id": stop["id"], "reason": "Visit does not fit opening hours"})
         if start < start_at or finish > end_at:
             conflicts.append({"constraint_type": "schedule_horizon", "stop_id": stop["id"], "reason": "Stop outside schedule horizon"})
-        timing.append({"arrival": arrival, "start": start, "end": finish, "travel": leg.minutes, "distance": leg.distance_km, "wait": max(0, (start - arrival).total_seconds() / 60)})
+        timing.append({"departure": current_time, "arrival": arrival, "start": start, "end": finish, "travel": leg.minutes, "distance": leg.distance_km, "wait": max(0, (start - arrival).total_seconds() / 60)})
         travel_total += leg.minutes
         current_time, current_loc = finish, stop["location"]
 
@@ -145,11 +147,26 @@ def metrics(stops, req, provider, mode):
         endleg = Leg(0, 0)
     travel = sum(x["travel"] for x in timing) + endleg.minutes
     distance = sum(x["distance"] for x in timing) + endleg.distance_km
-    return {"feasible": ok, "travel_minutes": round(travel, 2), "distance_km": round(distance, 2), "waiting_minutes": round(sum(x["wait"] for x in timing), 2), "stop_count": len(stops)}, conflicts
+    timeline = []
+    for stop, item in zip(stops, timing):
+        timeline.append({
+            "stop_id": stop["id"],
+            "title": stop["title"],
+            "location": stop["location"],
+            "departed_at": item["departure"].isoformat(),
+            "arrival_at": item["arrival"].isoformat(),
+            "start_at": item["start"].isoformat(),
+            "end_at": item["end"].isoformat(),
+            "travel_minutes": round(item["travel"], 2),
+            "distance_km": round(item["distance"], 2),
+            "waiting_minutes": round(item["wait"], 2),
+        })
+    return_departure = timing[-1]["end"] if timing else req["start_at"]
+    return {"feasible": ok, "travel_minutes": round(travel, 2), "distance_km": round(distance, 2), "waiting_minutes": round(sum(x["wait"] for x in timing), 2), "stop_count": len(stops), "timeline": timeline, "return_departure_at": return_departure.isoformat(), "return_arrival_at": (return_departure + timedelta(minutes=endleg.minutes)).isoformat(), "return_travel_minutes": round(endleg.minutes, 2)} , conflicts
 
 
 def plan(req, provider=None, mode="Walking"):
-    provider = provider or MockTravelProvider()
+    provider = CachedTravelProvider(provider or MockTravelProvider())
     existing = req["existing_stops"]
     before, before_conflicts = metrics(existing, req, provider, mode)
     if not before["feasible"]:
@@ -198,3 +215,63 @@ def plan(req, provider=None, mode="Walking"):
         return {"feasible": False, "stops": existing, "metrics": {"before": before, "after": None}, "conflicts": [{"constraint_type": "no_feasible_candidate", "reason": "No candidate plan satisfies hard constraints"}], "explanation_facts": ["Try another destination or adjust a user-approved constraint."]}
     score, best, after = min(valid, key=lambda item: (item[0], [s["id"] for s in item[1]]))
     return {"feasible": True, "stops": best, "metrics": {"before": before, "after": after, "score": score}, "conflicts": [], "explanation_facts": [f"Travel time changes by {after['travel_minutes'] - before['travel_minutes']:+.1f} minutes.", "All configured hard constraints passed validation."]}
+
+
+class CachedTravelProvider:
+    """Memoize route legs so each distinct pair is fetched at most once per plan."""
+
+    def __init__(self, provider):
+        self.provider = provider
+        self.cache = {}
+
+    @staticmethod
+    def _key(location):
+        return (round(float(location["latitude"]), 7), round(float(location["longitude"]), 7))
+
+    def leg(self, origin, destination, mode="Walking"):
+        key = (self._key(origin), self._key(destination), mode)
+        if key not in self.cache:
+            self.cache[key] = self.provider.leg(origin, destination, mode)
+        return self.cache[key]
+
+
+def optimize_schedule(req, provider=None, mode="Walking"):
+    """Find the lowest-cost feasible ordering within a bounded search budget."""
+    provider = CachedTravelProvider(provider or MockTravelProvider())
+    stops = req["existing_stops"]
+    budget = max(1, int(req.get("max_candidate_evaluations", 500)))
+    # A schedule with many stops can still be planned safely: enumerate a bounded
+    # subset of stable input-order permutations, and tell callers when search was capped.
+    possibilities = permutations(stops) if len(stops) <= 8 else iter([tuple(stops)])
+    search_truncated = len(stops) > 8 or factorial(len(stops)) > budget
+    best = None
+    evaluated = 0
+    all_conflicts = []
+    for candidate in possibilities:
+        if evaluated >= budget:
+            break
+        evaluated += 1
+        after, conflicts = metrics(list(candidate), req, provider, mode)
+        if not after["feasible"]:
+            all_conflicts.extend(conflicts)
+            continue
+        disruption = sum(a != b for a, b in zip([s["id"] for s in stops], [s["id"] for s in candidate]))
+        score = after["travel_minutes"] + after["distance_km"] * 0.1 + disruption * 2 + after["waiting_minutes"] * 0.25
+        tie_break = tuple(s["id"] for s in candidate)
+        if best is None or (score, tie_break) < (best[0], best[1]):
+            best = (score, tie_break, list(candidate), after)
+
+    if best is None:
+        unique_conflicts = []
+        seen = set()
+        for conflict in all_conflicts:
+            marker = (conflict.get("constraint_type"), conflict.get("stop_id"), conflict.get("reason"))
+            if marker not in seen:
+                seen.add(marker)
+                unique_conflicts.append(conflict)
+        if evaluated == 0:
+            unique_conflicts = [{"constraint_type": "candidate_limit", "reason": "No schedule order was evaluated"}]
+        return {"feasible": False, "stops": stops, "metrics": {"before": None, "after": None}, "conflicts": unique_conflicts, "explanation_facts": ["No ordering in the evaluated search budget satisfies all hard constraints."], "evaluated_orders": evaluated, "search_truncated": search_truncated}
+
+    _, _, ordered, after = best
+    return {"feasible": True, "stops": ordered, "metrics": {"after": after, "score": round(best[0], 3)}, "conflicts": [], "explanation_facts": [f"Evaluated {evaluated} itinerary order(s).", f"Estimated travel: {after['travel_minutes']:.1f} minutes over {after['distance_km']:.1f} km.", "All configured hard constraints passed validation."], "evaluated_orders": evaluated, "search_truncated": search_truncated}

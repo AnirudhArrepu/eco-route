@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 *.db
 .pytest_cache/
+.lambda-package-*/
+ecoroute-workflow-*.zip

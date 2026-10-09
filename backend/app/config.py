@@ -3,6 +3,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "sqlite:///./ecoroute.db"
+    database_secret_arn: str = ""
+    database_host: str = ""
+    database_port: int = 5432
     aws_region: str = "ap-south-1"
     aws_integrations_enabled: bool = False
     cognito_user_pool_id: str = ""

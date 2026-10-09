@@ -9,7 +9,12 @@ pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --reload
 ```
-Open `/docs`. SQLite is the quick-start default. Startup applies Alembic migrations automatically;
+Open `/app` for the day planner or `/docs` for the API. The planner lets users search for start,
+end, and stop locations through Amazon Location (or enter coordinates), set durations, deadlines,
+and fixed appointment times, then preview a bounded, constraint-checked itinerary before saving.
+After saving, the same screen can send a place-search or replan request through the configured agent
+workflow, evaluate a selected destination, and approve or reject the resulting proposal.
+SQLite is the quick-start default. Startup applies Alembic migrations automatically;
 set `AUTO_MIGRATE=false` when migrations are applied by a separate release step. To migrate manually,
 run `python -m alembic upgrade head`. `docker compose up --build` runs PostgreSQL.
 
@@ -55,7 +60,10 @@ proposal generation.
 ## Current MVP boundaries
 The schedule planner validates hard appointment and time-window constraints before schedule creation,
 checks precedence and maximum travel-time constraints, includes the return leg in route metrics, and
-uses a bounded deterministic insertion search. Proposals are persisted without changing a schedule;
+uses a bounded deterministic insertion search. New-schedule previews evaluate candidate stop orders,
+cache route estimates for repeated legs, and return the timed itinerary, travel distance, and waiting
+time. Previews do not persist a schedule; save only after reviewing the result. Proposals are
+persisted without changing a schedule;
 approval checks ownership, expiration, revision, and plan feasibility in a transaction. Explicit
 travel-mode preferences affect route estimates. Weekly routines can be managed under `/v1/routines`
 and included when creating a schedule.
@@ -69,8 +77,11 @@ The local development configuration uses SQLite and mock routing; it does not va
 permissions or resources. Local API and planner tests run with `python -m pytest -q`.
 
 ## Endpoints
+- `POST /v1/schedules/preview`
 - `POST /v1/schedules`
+- `GET /v1/places/search?query=...&latitude=...&longitude=...`
 - `GET /v1/schedules/{id}?user_id=...`
+- `GET /v1/schedules/{id}/timeline?user_id=...`
 - `POST /v1/schedules/{id}/stops?user_id=...`
 - `POST /v1/schedules/{id}/replan?user_id=...`
 - `POST /v1/agent/requests`

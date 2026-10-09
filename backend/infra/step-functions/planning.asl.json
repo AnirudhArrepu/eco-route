@@ -56,14 +56,26 @@
     "CheckScheduleForPlaces": {
       "Type": "Choice",
       "Choices": [
-        {"Variable": "$.schedule_id", "IsPresent": true, "IsNull": false, "Next": "DiscoverPlaces"}
+        {
+          "And": [
+            {"Variable": "$.schedule_id", "IsPresent": true},
+            {"Variable": "$.schedule_id", "IsNull": false}
+          ],
+          "Next": "DiscoverPlaces"
+        }
       ],
       "Default": "ScheduleIdRequired"
     },
     "CheckScheduleForReplan": {
       "Type": "Choice",
       "Choices": [
-        {"Variable": "$.schedule_id", "IsPresent": true, "IsNull": false, "Next": "CreateReplanProposal"}
+        {
+          "And": [
+            {"Variable": "$.schedule_id", "IsPresent": true},
+            {"Variable": "$.schedule_id", "IsNull": false}
+          ],
+          "Next": "CreateReplanProposal"
+        }
       ],
       "Default": "ScheduleIdRequired"
     },

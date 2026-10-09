@@ -51,6 +51,9 @@ class ScheduleCreate(BaseModel):
     constraints: list[ConstraintIn] = Field(default_factory=list)
     include_routines: bool = True
 
+class SchedulePreview(ScheduleCreate):
+    max_candidate_evaluations: int = Field(default=500, ge=1, le=5000)
+
 class AddStopRequest(BaseModel):
     user_id: str
     destination: StopIn

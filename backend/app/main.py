@@ -1,15 +1,16 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.config import settings
 from app.db import Base, engine, get_db
 from app import models
-from app.schemas import ScheduleCreate, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate
-from app.service import create_schedule, get_schedule, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid
-from app.integrations import parse_intent, search_places
+from app.schemas import ScheduleCreate, SchedulePreview, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate
+from app.service import create_schedule, preview_schedule, get_schedule, get_schedule_timeline, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid
+from app.integrations import parse_intent, search_places, infer_replan_updates
 from app.auth import authenticated_user, resolve_user_id
 from app.strands_agent import interpret_with_strands
 from app.workflows import start_planning_execution, get_planning_execution
@@ -35,6 +36,15 @@ def owner(user_id, principal):
 
 @app.get("/")
 def root(): return {"name":"EcoRoute API","docs":"/docs"}
+
+@app.get("/app",include_in_schema=False)
+def web_app(): return FileResponse(Path(__file__).resolve().parent.parent / "web" / "index.html")
+
+@app.get("/app/{asset}",include_in_schema=False)
+def web_asset(asset:str):
+    if asset not in {"app.js","style.css"}:
+        raise HTTPException(404,"Asset not found")
+    return FileResponse(Path(__file__).resolve().parent.parent / "web" / asset)
 @app.get("/health")
 def health(): return {"status":"ok"}
 
@@ -50,7 +60,25 @@ def ready(db:Session=Depends(get_db)):
 def create(req:ScheduleCreate,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     s=create_schedule(db,req)
-    return {"id":s.id,"user_id":s.user_id,"date":s.schedule_date.isoformat(),"current_revision":s.current_revision,"status":s.status}
+    return {"id":s.id,"user_id":s.user_id,"date":s.schedule_date.isoformat(),"current_revision":s.current_revision,"status":s.status,"metrics":s.planning_metrics,"timeline":s.planning_timeline,"travel_estimate_source":s.planning_source}
+
+@app.post("/v1/schedules/preview")
+def preview(req:SchedulePreview,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
+    return preview_schedule(db,req,req.max_candidate_evaluations)
+
+@app.get("/v1/places/search")
+def place_search(query:str,latitude:float|None=None,longitude:float|None=None,principal:str|None=Depends(authenticated_user)):
+    if not query.strip():
+        raise HTTPException(422,"query must not be empty")
+    bias=[longitude,latitude] if latitude is not None and longitude is not None else None
+    if (latitude is None) != (longitude is None):
+        raise HTTPException(422,"latitude and longitude must be supplied together")
+    if latitude is not None and not -90 <= latitude <= 90:
+        raise HTTPException(422,"latitude must be between -90 and 90")
+    if longitude is not None and not -180 <= longitude <= 180:
+        raise HTTPException(422,"longitude must be between -180 and 180")
+    return {"places":search_places(query,bias,10)}
 
 @app.get("/v1/schedules/{sid}")
 def read_schedule(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
@@ -59,6 +87,11 @@ def read_schedule(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|N
     rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==sid).order_by(models.Stop.order_index)).all()
     cs=db.scalars(select(models.ScheduleConstraint).where(models.ScheduleConstraint.schedule_id==sid)).all()
     return {"id":s.id,"user_id":s.user_id,"date":s.schedule_date.isoformat(),"timezone":s.timezone,"start_at":s.start_at.isoformat(),"end_at":s.end_at.isoformat(),"start_location":s.start_location,"end_location":s.end_location,"status":s.status,"current_revision":s.current_revision,"stops":[row_stop(x) for x in rows],"constraints":[{"type":c.type,"hardness":c.hardness,"weight":c.weight,"parameters":c.parameters} for c in cs]}
+
+@app.get("/v1/schedules/{sid}/timeline")
+def timeline(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
+    return get_schedule_timeline(db,sid,user_id)
 
 @app.post("/v1/schedules/{sid}/stops")
 def add_stop(sid:str,req:AddStopRequest,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
@@ -94,7 +127,10 @@ def agent(req:AgentRequest,db:Session=Depends(get_db),principal:str|None=Depends
         return {"status":"destination_candidates" if places else "needs_destination_selection","intent":intent,"candidates":places,"message":"Choose a place, verify any product details, then submit it to the stops endpoint."}
     if op=="replan":
         if not req.schedule_id: raise HTTPException(422,"schedule_id is required")
-        return proposal_json(replan(db,req.schedule_id,ReplanRequest(user_id=req.user_id,reason=req.text)))
+        schedule=get_schedule(db,req.schedule_id,req.user_id)
+        rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==schedule.id).order_by(models.Stop.order_index)).all()
+        updates=infer_replan_updates(req.text,[row_stop(row) for row in rows])
+        return proposal_json(replan(db,req.schedule_id,ReplanRequest(user_id=req.user_id,updates=updates,reason=req.text)))
     return {"status":"clarification_required","question":"Create a schedule first, then provide its schedule_id to add destinations or replan.","intent":intent}
 
 @app.get("/v1/proposals/{pid}")

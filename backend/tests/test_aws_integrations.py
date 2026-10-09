@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from app import auth, workflows
 from app.config import settings
+from app.integrations import infer_replan_updates, parse_intent
 from app.main import app
 from app.auth import authenticated_user
 from fastapi.testclient import TestClient
@@ -141,3 +142,17 @@ def test_step_functions_definition_and_worker_interpret_contract(monkeypatch):
     result = workflow_worker.run_action({"action": "interpret", "request_text": "meeting extended", "timezone": "Asia/Kolkata", "user_id": "user-1"})
     assert result["intent"]["operation"] == "replan"
     assert result["user_id"] == "user-1"
+
+
+def test_replan_understands_explicit_meeting_extension():
+    stops = [{"id": "meeting-1", "title": "Daily sync", "type": "meeting", "duration_minutes": 30}]
+    assert infer_replan_updates("My meeting was extended by 45 minutes", stops) == {"meeting-1": {"duration_minutes": 75}}
+    assert parse_intent("My meeting was extended by 45 minutes")["operation"] == "replan"
+
+
+def test_replan_does_not_guess_which_stop_was_extended():
+    stops = [
+        {"id": "meeting-1", "title": "Team sync", "type": "meeting", "duration_minutes": 30},
+        {"id": "meeting-2", "title": "Client sync", "type": "meeting", "duration_minutes": 30},
+    ]
+    assert infer_replan_updates("My meeting was extended by 45 minutes", stops) == {}

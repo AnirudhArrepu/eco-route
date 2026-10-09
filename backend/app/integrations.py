@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 class AmazonLocation:
     def __init__(self):
-        self.client = boto3.client("geo", region_name=settings.aws_region, config=Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 2}))
+        self.client = boto3.client("location", region_name=settings.aws_region, config=Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 2}))
     def search(self, text, bias=None, max_results=10):
         args={"IndexName":settings.location_index_name,"Text":text,"MaxResults":min(max(1,max_results),20)}
         if bias: args["BiasPosition"]=bias
@@ -66,7 +66,7 @@ def parse_intent(text, timezone="UTC"):
     low=text.lower().strip()
     if not low:
         return {"operation":"clarify","destination_query":None,"clarification_needed":True,"clarification_question":"What would you like to plan or change?"}
-    if any(x in low for x in ("replan","reschedule","meeting moved","meeting extended","running late")):
+    if any(x in low for x in ("replan","reschedule","meeting moved","meeting extended","running late")) or re.search(r"\b(meeting|appointment|class|call)\b.*\b(extended|moved|rescheduled|running late|changed)\b",low):
         return {"operation":"replan","destination_query":None,"clarification_needed":False,"clarification_question":None}
     if any(x in low for x in ("create a schedule","plan my day","make a schedule","schedule for tomorrow","schedule for today")):
         return {"operation":"create_schedule","destination_query":None,"clarification_needed":False,"clarification_question":None}
@@ -75,3 +75,26 @@ def parse_intent(text, timezone="UTC"):
     if budget_match:
         query=(text[:budget_match.start()] + text[budget_match.end():]).strip(" ,.;")
     return {"operation":"add_destination","destination_query":query,"budget_inr":int(budget_match.group(1).replace(",","")) if budget_match else None,"clarification_needed":False,"clarification_question":None,"verification_note":"Place search does not verify product stock or price."}
+
+def infer_replan_updates(text, stops):
+    """Extract only explicit duration extensions that can be tied to one stop."""
+    import re
+
+    match=re.search(r"\b(?:extended|increased|lengthened|longer|add(?:ed)?)\s+(?:by\s+)?(\d+)\s*(?:minutes?|mins?)\b",text,re.IGNORECASE)
+    if not match:
+        return {}
+    minutes=int(match.group(1))
+    if minutes <= 0:
+        return {}
+    normalized=text.casefold()
+    matched=[stop for stop in stops if stop.get("title") and stop["title"].casefold() in normalized]
+    if not matched and re.search(r"\b(meeting|appointment|class|call)\b",normalized):
+        matched=[stop for stop in stops if any(term in f"{stop.get('type','')} {stop.get('title','')}".casefold() for term in ("meeting","appointment","class","call"))]
+    if not matched and re.search(r"\b(meeting|appointment|class|call)\b",normalized):
+        fixed=[stop for stop in stops if stop.get("fixed_start")]
+        if len(fixed)==1:
+            matched=fixed
+    if len(matched)!=1:
+        return {}
+    stop=matched[0]
+    return {stop["id"]:{"duration_minutes":int(stop["duration_minutes"])+minutes}}

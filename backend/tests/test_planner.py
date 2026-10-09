@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from app.planner import plan, MockTravelProvider
+from app.planner import plan, MockTravelProvider, optimize_schedule, Leg
 
 def dt(h,m=0): return datetime(2026,10,9,h,m,tzinfo=timezone.utc)
 def stop(i,lat,lon,d=20,fixed=None):
@@ -40,3 +40,36 @@ def test_candidate_evaluation_limit_zero_returns_structured_conflict():
     result=plan(request,MockTravelProvider())
     assert not result["feasible"]
     assert result["conflicts"][0]["constraint_type"]=="candidate_limit"
+
+def test_new_schedule_optimizer_returns_timed_order_and_respects_deadline():
+    first=stop("late-shop",13.03,80.23,20)
+    first["latest_start"] = dt(11).isoformat()
+    second=stop("early-meeting",13.01,80.21,30)
+    second["latest_end"] = dt(10,30).isoformat()
+    request=req([first,second],[])
+    result=optimize_schedule(request,MockTravelProvider())
+    assert result["feasible"]
+    assert [item["id"] for item in result["stops"]][0] == "early-meeting"
+    timeline=result["metrics"]["after"]["timeline"]
+    assert timeline[0]["start_at"] <= timeline[0]["end_at"]
+    assert result["metrics"]["after"]["return_arrival_at"]
+
+def test_schedule_optimizer_reports_infeasible_deadline():
+    item=stop("impossible",13.02,80.22,60)
+    item["latest_end"] = dt(9,1).isoformat()
+    result=optimize_schedule(req([item],[]),MockTravelProvider())
+    assert not result["feasible"]
+    assert any(conflict["constraint_type"] in {"latest_end","schedule_horizon"} for conflict in result["conflicts"])
+
+def test_schedule_optimizer_caches_route_legs_across_orders():
+    class CountingProvider:
+        def __init__(self): self.calls=[]
+        def leg(self,a,b,mode="Walking"):
+            key=(a["latitude"],a["longitude"],b["latitude"],b["longitude"],mode)
+            self.calls.append(key)
+            return Leg(1,1)
+    provider=CountingProvider()
+    request=req([stop("a",13.01,80.21),stop("b",13.02,80.22),stop("c",13.03,80.23)],[])
+    result=optimize_schedule(request,provider)
+    assert result["feasible"]
+    assert len(provider.calls)==len(set(provider.calls))

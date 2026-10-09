@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 from app import models
 from app.schemas import ScheduleCreate, StopIn, ConstraintIn, AddStopRequest, ReplanRequest
-from app.planner import plan
+from app.planner import plan, optimize_schedule
 from app.integrations import TravelProvider
 from app.config import settings
 
@@ -52,11 +52,14 @@ def create_schedule(db,req:ScheduleCreate):
         raise HTTPException(422,"Stop ids must be unique within a schedule")
     constraints=[constraint.model_dump() for constraint in req.constraints]
     try:
-        validation=plan({"start_at":req.start_at,"end_at":req.end_at,"start_location":req.start_location.model_dump(mode="json"),"end_location":req.end_location.model_dump(mode="json"),"existing_stops":prepared,"candidate_stops":[],"constraints":constraints},TravelProvider(),user_travel_mode(db,req.user_id))
+        planning=optimize_schedule({"start_at":req.start_at,"end_at":req.end_at,"start_location":req.start_location.model_dump(mode="json"),"end_location":req.end_location.model_dump(mode="json"),"existing_stops":prepared,"candidate_stops":[],"constraints":constraints,"max_candidate_evaluations":500},TravelProvider(),user_travel_mode(db,req.user_id))
     except Exception as exc:
         raise HTTPException(502,"Travel provider failed to validate the schedule") from exc
-    if not validation["feasible"]:
-        raise HTTPException(422,{"message":"Schedule violates hard planning constraints","conflicts":validation["conflicts"]})
+    if not planning["feasible"]:
+        raise HTTPException(422,{"message":"Schedule violates hard planning constraints","conflicts":planning["conflicts"]})
+    original_stops={prepared_stop["id"]: stop for stop,prepared_stop in zip(stops,prepared)}
+    prepared=planning["stops"]
+    stops=[original_stops[prepared_stop["id"]] for prepared_stop in prepared]
     sid=uid()
     s=models.Schedule(id=sid,user_id=req.user_id,schedule_date=req.date,timezone=req.timezone,start_at=req.start_at,end_at=req.end_at,start_location=req.start_location.model_dump(mode="json"),end_location=req.end_location.model_dump(mode="json"),current_revision=1,status="active")
     db.add(s); db.flush()
@@ -67,12 +70,58 @@ def create_schedule(db,req:ScheduleCreate):
     db.flush()
     db.add(models.PlanRevision(id=uid(),schedule_id=sid,revision_number=1,snapshot=snapshot(db,s),reason="Initial schedule"))
     db.commit(); db.refresh(s)
+    s.planning_metrics=planning["metrics"].get("after")
+    s.planning_timeline=(planning["metrics"].get("after") or {}).get("timeline",[])
+    s.planning_source="amazon_location" if settings.aws_integrations_enabled else "local_mock"
     return s
+
+def preview_schedule(db,req, max_candidate_evaluations=500):
+    if req.end_at <= req.start_at:
+        raise HTTPException(422,"end_at must be after start_at")
+    if req.start_at.tzinfo is None or req.end_at.tzinfo is None:
+        raise HTTPException(422,"Schedule timestamps must include a timezone")
+    stops=list(req.stops)
+    if req.include_routines:
+        routines=db.scalars(select(models.Routine).where(models.Routine.user_id==req.user_id,models.Routine.weekday==req.date.weekday(),models.Routine.active.is_(True))).all()
+        present={st.id for st in stops if st.id}
+        for routine in routines:
+            routine_stop=StopIn.model_validate(routine.stop)
+            routine_stop.id=routine_stop.id or f"routine-{routine.id}"
+            if routine_stop.id not in present:
+                stops.append(routine_stop)
+    prepared=[input_stop(stop) for stop in stops]
+    if len({stop["id"] for stop in prepared}) != len(prepared):
+        raise HTTPException(422,"Stop ids must be unique within a schedule")
+    request={"start_at":req.start_at,"end_at":req.end_at,"start_location":req.start_location.model_dump(mode="json"),"end_location":req.end_location.model_dump(mode="json"),"existing_stops":prepared,"candidate_stops":[],"constraints":[constraint.model_dump() for constraint in req.constraints],"max_candidate_evaluations":max_candidate_evaluations}
+    try:
+        result=optimize_schedule(request,TravelProvider(),user_travel_mode(db,req.user_id))
+    except Exception as exc:
+        raise HTTPException(502,"Travel provider failed to plan the schedule") from exc
+    facts=result["explanation_facts"]
+    estimate_source="amazon_location" if settings.aws_integrations_enabled else "local_mock"
+    if estimate_source=="local_mock":
+        facts.append("Travel times and distances are local development estimates, not live route results.")
+    if result["search_truncated"]:
+        facts.append("The itinerary search reached its evaluation limit; a larger search budget may find a better order.")
+    metrics_after=result.get("metrics",{}).get("after")
+    return {"feasible":result["feasible"],"stops":result["stops"],"timeline":(metrics_after or {}).get("timeline",[]),"metrics":metrics_after,"conflicts":result["conflicts"],"explanation_facts":facts,"evaluated_orders":result["evaluated_orders"],"search_truncated":result["search_truncated"],"travel_estimate_source":estimate_source}
 
 def get_schedule(db,sid,user_id):
     s=db.get(models.Schedule,sid)
     if not s or s.user_id!=user_id: raise HTTPException(404,"Schedule not found")
     return s
+
+def get_schedule_timeline(db,sid,user_id):
+    schedule=get_schedule(db,sid,user_id)
+    rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==sid).order_by(models.Stop.order_index)).all()
+    existing=[row_stop(row) for row in rows]
+    request=make_plan_request(db,schedule,existing,[],[],False,0)
+    try:
+        result=plan(request,TravelProvider(),request["preferred_travel_mode"])
+    except Exception as exc:
+        raise HTTPException(502,"Travel provider failed to calculate the schedule timeline") from exc
+    metrics_after=result["metrics"].get("after")
+    return {"schedule_id":schedule.id,"revision":schedule.current_revision,"feasible":result["feasible"],"timeline":(metrics_after or {}).get("timeline",[]),"metrics":metrics_after,"conflicts":result["conflicts"],"travel_estimate_source":"amazon_location" if settings.aws_integrations_enabled else "local_mock"}
 
 def user_travel_mode(db,user_id):
     preference=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key=="travel_mode"))

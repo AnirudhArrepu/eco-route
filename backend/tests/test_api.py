@@ -160,3 +160,22 @@ def test_agent_returns_place_candidates_or_explicit_local_unavailability(client,
     assert result["intent"]["budget_inr"] == 800
     assert result["status"] in {"destination_candidates", "needs_destination_selection"}
     assert "verify" in result["message"].lower()
+
+
+def test_schedule_preview_returns_optimized_timeline_without_persisting(client, schedule_payload, destination):
+    schedule_payload["include_routines"] = False
+    destination["location"] = {"latitude": 13.02, "longitude": 80.22, "label": "shop"}
+    destination["latest_end"] = "2026-10-12T11:00:00+05:30"
+    schedule_payload["stops"] = [destination]
+    response = client.post("/v1/schedules/preview", json={**schedule_payload, "max_candidate_evaluations": 100})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["feasible"] is True
+    assert result["timeline"][0]["title"] == "grocery store"
+    assert result["timeline"][0]["start_at"]
+    assert result["metrics"]["distance_km"] >= 0
+
+
+def test_place_search_requires_coordinate_bias_pair(client):
+    response = client.get("/v1/places/search", params={"query": "coffee", "latitude": 13})
+    assert response.status_code == 422
