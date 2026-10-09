@@ -17,13 +17,16 @@ class ParsedIntent(BaseModel):
 
 
 def interpret_with_strands(text: str, timezone: str = "UTC", bias: list[float] | None = None) -> dict:
+    if not settings.mantle_enabled:
+        raise HTTPException(503, "OPENAI_API_KEY and OPENAI_BASE_URL are required for the Mantle agent")
     if not settings.bedrock_model_id:
-        raise HTTPException(503, "BEDROCK_MODEL_ID is required for Strands")
+        raise HTTPException(503, "BEDROCK_MODEL_ID is required for the Mantle agent")
     if not settings.aws_integrations_enabled or not settings.location_index_name:
         raise HTTPException(503, "Amazon Location place search must be configured for the Strands agent")
 
     try:
         from strands import Agent, tool
+        from strands.models.openai import OpenAIModel
         tool_calls = 0
 
         @tool
@@ -35,8 +38,19 @@ def interpret_with_strands(text: str, timezone: str = "UTC", bias: list[float] |
                 raise RuntimeError("Strands place-search tool-call limit exceeded")
             return {"places": search_places(query, bias, 10)}
 
+        model = OpenAIModel(
+            model_id=settings.bedrock_model_id,
+            client_args={
+                "api_key": settings.openai_api_key.get_secret_value(),
+                "base_url": settings.openai_base_url,
+                "project": settings.openai_project_id or None,
+                "timeout": 20,
+                "max_retries": 1,
+            },
+            params={"temperature": 0, "max_tokens": 800},
+        )
         agent = Agent(
-            model=settings.bedrock_model_id,
+            model=model,
             tools=[search_places_tool],
             callback_handler=None,
             structured_output_model=ParsedIntent,

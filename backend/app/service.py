@@ -208,6 +208,8 @@ def approve(db,p,req):
             p.status="stale"
             raise HTTPException(409,"Schedule changed; generate a new proposal")
         db.query(models.Stop).filter(models.Stop.schedule_id==s.id).delete(synchronize_session=False)
+        for row in current_rows:
+            db.expunge(row)
         for i,x in enumerate(p.proposed_stops):
             db.add(models.Stop(id=x["id"],schedule_id=s.id,order_index=i,title=x["title"],type=x["type"],location=x["location"],duration_minutes=x["duration_minutes"],earliest_start=datetime.fromisoformat(x["earliest_start"]) if x.get("earliest_start") else None,latest_start=datetime.fromisoformat(x["latest_start"]) if x.get("latest_start") else None,latest_end=datetime.fromisoformat(x["latest_end"]) if x.get("latest_end") else None,fixed_start=datetime.fromisoformat(x["fixed_start"]) if x.get("fixed_start") else None,opening_hours=x.get("opening_hours"),priority=x.get("priority",3),mandatory=x.get("mandatory",False),status=x.get("status","planned"),source=x.get("source","user"),attributes=x.get("attributes",{})))
         db.flush()

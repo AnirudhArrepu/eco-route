@@ -46,22 +46,40 @@ def search_places(text,bias=None,max_results=10):
         raise HTTPException(502,"Amazon Location place search failed") from exc
 
 def parse_intent(text, timezone="UTC"):
-    if settings.aws_integrations_enabled and settings.bedrock_model_id:
-        client=boto3.client("bedrock-runtime",region_name=settings.aws_region,config=Config(connect_timeout=3,read_timeout=15,retries={"max_attempts":2}))
-        prompt=("Return JSON only with keys operation,destination_query,clarification_needed,clarification_question. "
-                "Allowed operation: add_destination,replan,create_schedule,clarify. Never invent inventory or prices. "
-                f"Timezone={timezone}. User request={text}")
-        response=client.converse(modelId=settings.bedrock_model_id,messages=[{"role":"user","content":[{"text":prompt}]}],inferenceConfig={"temperature":0,"maxTokens":500})
-        content=response["output"]["message"]["content"]
-        raw="".join(x.get("text","") for x in content)
-        import json
+    if settings.mantle_enabled:
         try:
-            parsed=json.loads(raw[raw.find("{"):raw.rfind("}")+1])
-            if not isinstance(parsed,dict) or parsed.get("operation") not in {"add_destination","replan","create_schedule","clarify"}:
-                raise ValueError("Unsupported intent response")
-            return parsed
-        except (ValueError, json.JSONDecodeError) as exc:
-            raise HTTPException(502,"Bedrock returned an invalid intent response") from exc
+            from openai import OpenAI
+
+            client=OpenAI(
+                api_key=settings.openai_api_key.get_secret_value(),
+                base_url=settings.openai_base_url,
+                project=settings.openai_project_id or None,
+                timeout=20,
+                max_retries=1,
+            )
+            prompt=("Return one JSON object only with keys operation,destination_query,budget_inr,"
+                    "clarification_needed,clarification_question. Allowed operation: add_destination,"
+                    "replan,create_schedule,clarify. Preserve the user's destination wording. Never invent "
+                    "inventory, prices, opening hours, or travel facts. Ask for clarification when required. "
+                    f"Timezone={timezone}. User request={text}")
+            response=client.chat.completions.create(
+                model=settings.bedrock_model_id or "openai.gpt-oss-safeguard-20b",
+                messages=[{"role":"user","content":prompt}],
+                temperature=0,
+                response_format={"type":"json_object"},
+            )
+            import json
+            from pydantic import ValidationError
+            from app.strands_agent import ParsedIntent
+            raw=response.choices[0].message.content or ""
+            parsed=ParsedIntent.model_validate_json(raw)
+            return parsed.model_dump()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502,"Bedrock Mantle returned an invalid intent response") from exc
+    if settings.aws_integrations_enabled and settings.bedrock_model_id:
+        raise HTTPException(503, "Configure OPENAI_API_KEY and OPENAI_BASE_URL for Bedrock Mantle inference")
     import re
     low=text.lower().strip()
     if not low:

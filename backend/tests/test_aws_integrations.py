@@ -104,9 +104,13 @@ def test_agent_endpoint_dispatches_to_step_functions(client, monkeypatch):
 def test_strands_agent_uses_typed_place_tool_and_validates_intent(monkeypatch):
     import sys
     import types
+    from pydantic import SecretStr
 
     monkeypatch.setattr(settings, "strands_agent_enabled", True)
     monkeypatch.setattr(settings, "bedrock_model_id", "configured-model")
+    monkeypatch.setattr(settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr(settings, "openai_project_id", "default")
     monkeypatch.setattr(settings, "aws_integrations_enabled", True)
     monkeypatch.setattr(settings, "location_index_name", "places")
     calls = []
@@ -115,6 +119,7 @@ def test_strands_agent_uses_typed_place_tool_and_validates_intent(monkeypatch):
     class FakeAgent:
         def __init__(self, **kwargs):
             self.tools = kwargs["tools"]
+            self.model = kwargs["model"]
 
         def __call__(self, _prompt):
             self.tools[0]("phone charger")
@@ -124,11 +129,30 @@ def test_strands_agent_uses_typed_place_tool_and_validates_intent(monkeypatch):
     fake_strands.Agent = FakeAgent
     fake_strands.tool = lambda function: function
     monkeypatch.setitem(sys.modules, "strands", fake_strands)
+    fake_models = types.ModuleType("strands.models")
+    fake_openai_model = types.ModuleType("strands.models.openai")
+
+    class FakeOpenAIModel:
+        def __init__(self, **kwargs):
+            self.config = kwargs
+
+    fake_openai_model.OpenAIModel = FakeOpenAIModel
+    monkeypatch.setitem(sys.modules, "strands.models", fake_models)
+    monkeypatch.setitem(sys.modules, "strands.models.openai", fake_openai_model)
     from app.strands_agent import interpret_with_strands
 
     parsed = interpret_with_strands("charger under ₹800", "Asia/Kolkata", [80.2, 13.0])
     assert parsed["budget_inr"] == 800
     assert calls == [("phone charger", [80.2, 13.0], 10)]
+
+
+def test_strands_agent_requires_mantle_credentials(monkeypatch):
+    from app.strands_agent import interpret_with_strands
+
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    monkeypatch.setattr(settings, "openai_base_url", "")
+    with pytest.raises(HTTPException, match="OPENAI_API_KEY and OPENAI_BASE_URL"):
+        interpret_with_strands("find coffee")
 
 
 def test_step_functions_definition_and_worker_interpret_contract(monkeypatch):
@@ -156,3 +180,39 @@ def test_replan_does_not_guess_which_stop_was_extended():
         {"id": "meeting-2", "title": "Client sync", "type": "meeting", "duration_minutes": 30},
     ]
     assert infer_replan_updates("My meeting was extended by 45 minutes", stops) == {}
+
+
+def test_parse_intent_uses_bedrock_mantle_openai_client(monkeypatch):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from app import integrations
+
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured["request"] = kwargs
+            message = SimpleNamespace(content=(
+                '{"operation":"add_destination","destination_query":"coffee shop in Connaught Place",'
+                '"budget_inr":null,"clarification_needed":false,"clarification_question":null}'
+            ))
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr(integrations.settings, "openai_project_id", "default")
+    monkeypatch.setattr(integrations.settings, "bedrock_model_id", "openai.gpt-oss-safeguard-20b")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    result = parse_intent("Find a coffee shop in Connaught Place", "Asia/Kolkata")
+
+    assert result["operation"] == "add_destination"
+    assert result["destination_query"] == "coffee shop in Connaught Place"
+    assert captured["client"]["base_url"] == "https://mantle.example/v1"
+    assert captured["client"]["project"] == "default"
+    assert captured["request"]["model"] == "openai.gpt-oss-safeguard-20b"

@@ -23,6 +23,11 @@ Set `DATABASE_URL` to RDS PostgreSQL and configure `AWS_REGION`, `AWS_INTEGRATIO
 `BEDROCK_MODEL_ID`, `LOCATION_INDEX_NAME`, and `LOCATION_ROUTE_CALCULATOR_NAME`. Use an ECS task
 role; don't put AWS access keys in source code. Enable Bedrock model access and provision an Amazon
 Location place index and route calculator in the configured region.
+For the OpenAI-compatible Bedrock Mantle API, set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and
+`OPENAI_PROJECT_ID`; `BEDROCK_MODEL_ID=openai.gpt-oss-safeguard-20b` selects the model. The Mantle
+variables take precedence over the AWS SDK Converse provider in `parse_intent`. Keep the API key
+only in the runtime's secret environment. For an AWS deployment, configure the same variables on
+the API and workflow Lambda; setting them in a local PowerShell session does not update Lambda.
 When AWS integrations are enabled, route and place provider failures are returned as errors;
 the backend does not silently substitute local estimates. With integrations disabled, the
 deterministic straight-line travel provider is intended only for local development. Set
@@ -35,10 +40,11 @@ against the pool JWKS, issuer, expiry, token use, and app client. The authentica
 the requested `user_id`; a client cannot use another user's ID. ECS needs outbound HTTPS access to
 the Cognito JWKS endpoint. The task role does not need Cognito API permissions for token checks.
 
-To route natural-language requests through Strands, set `STRANDS_AGENT_ENABLED=true` and configure
-the Bedrock model and Amazon Location place index. Its only application tool searches candidate
-places; the agent cannot write schedules or approve proposals. The deterministic planner and
-proposal service remain authoritative. `STRANDS_MAX_TOOL_CALLS` caps place-search tool calls.
+To route natural-language requests through the Strands agent, set `STRANDS_AGENT_ENABLED=true` and
+configure the Mantle credentials, model, and Amazon Location place index above. The agent uses the
+OpenAI-compatible Mantle endpoint for inference and its only application tool searches candidate
+places; it cannot write schedules or approve proposals. The deterministic planner and proposal
+service remain authoritative. `STRANDS_MAX_TOOL_CALLS` caps place-search tool calls.
 
 For asynchronous orchestration, set `STEP_FUNCTIONS_ENABLED=true` and
 `STEP_FUNCTIONS_STATE_MACHINE_ARN`. `POST /v1/agent/requests` then starts an execution and returns

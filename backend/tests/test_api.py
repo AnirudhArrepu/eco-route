@@ -38,6 +38,56 @@ def test_schedule_proposal_approval_and_revision_flow(client, schedule_payload, 
     assert [r["revision_number"] for r in revisions.json()] == [2, 1]
 
 
+def test_complete_create_modify_and_add_stop_workflow(client, schedule_payload, destination):
+    schedule_payload["stops"] = [{**destination, "id": "first-stop"}]
+    created = client.post("/v1/schedules", json=schedule_payload)
+    assert created.status_code == 200, created.text
+    schedule_id = created.json()["id"]
+    assert created.json()["current_revision"] == 1
+
+    # Modify the existing plan through a proposal, then approve it.
+    modified = client.post(
+        f"/v1/schedules/{schedule_id}/replan",
+        json={"user_id": "local-user", "updates": {"first-stop": {"duration_minutes": 45}}, "reason": "meeting ran long"},
+    )
+    assert modified.status_code == 200, modified.text
+    proposal_id = modified.json()["id"]
+    assert client.get(f"/v1/proposals/{proposal_id}", params={"user_id": "local-user"}).status_code == 200
+    accepted_modify = client.post(
+        f"/v1/proposals/{proposal_id}/approve",
+        json={"user_id": "local-user", "idempotency_key": "workflow-modify-001"},
+    )
+    assert accepted_modify.status_code == 200, accepted_modify.text
+
+    # Add a second stop to the now-existing plan and approve that proposal too.
+    second_stop = {**destination, "title": "pharmacy", "location": {"latitude": 13.03, "longitude": 80.23}}
+    added = client.post(
+        f"/v1/schedules/{schedule_id}/stops",
+        json={"user_id": "local-user", "destination": second_stop},
+    )
+    assert added.status_code == 200, added.text
+    accepted_add = client.post(
+        f"/v1/proposals/{added.json()['id']}/approve",
+        json={"user_id": "local-user", "idempotency_key": "workflow-add-stop-001"},
+    )
+    assert accepted_add.status_code == 200, accepted_add.text
+
+    saved = client.get(f"/v1/schedules/{schedule_id}", params={"user_id": "local-user"})
+    assert saved.status_code == 200
+    assert saved.json()["current_revision"] == 3
+    saved_stops = saved.json()["stops"]
+    assert {stop["title"]: stop["duration_minutes"] for stop in saved_stops} == {
+        "grocery store": 45,
+        "pharmacy": 30,
+    }
+    timeline = client.get(f"/v1/schedules/{schedule_id}/timeline", params={"user_id": "local-user"})
+    assert timeline.status_code == 200
+    assert timeline.json()["revision"] == 3
+    assert [item["title"] for item in timeline.json()["timeline"]] == [stop["title"] for stop in saved_stops]
+    revisions = client.get(f"/v1/schedules/{schedule_id}/revisions", params={"user_id": "local-user"})
+    assert [revision["revision_number"] for revision in revisions.json()] == [3, 2, 1]
+
+
 def test_rejected_proposal_does_not_change_schedule(client, schedule_payload, destination):
     schedule_id = create_schedule(client, schedule_payload)
     proposal = client.post(
@@ -179,3 +229,40 @@ def test_schedule_preview_returns_optimized_timeline_without_persisting(client, 
 def test_place_search_requires_coordinate_bias_pair(client):
     response = client.get("/v1/places/search", params={"query": "coffee", "latitude": 13})
     assert response.status_code == 422
+
+
+def test_remaining_service_discovery_and_crud_endpoints(client, monkeypatch):
+    from app import main
+    from app.config import settings
+
+    assert client.get("/").json()["docs"] == "/docs"
+    assert client.get("/app").status_code == 200
+    assert client.get("/app/app.js").status_code == 200
+    assert client.get("/app/style.css").status_code == 200
+
+    monkeypatch.setattr(main, "search_places", lambda query, bias, limit: [{"title": query, "bias": bias, "limit": limit}])
+    places = client.get("/v1/places/search", params={"query": "coffee", "latitude": 13, "longitude": 80})
+    assert places.status_code == 200
+    assert places.json()["places"][0]["title"] == "coffee"
+
+    created = client.post("/v1/preferences", json={"user_id": "local-user", "key": "coffee", "value": {"milk": False}})
+    assert created.status_code == 200
+    assert client.get("/v1/preferences", params={"user_id": "local-user"}).json()[0]["key"] == "coffee"
+    updated = client.put(
+        "/v1/preferences/coffee",
+        params={"user_id": "local-user"},
+        json={"value": {"milk": True}, "confidence": 1, "source": "explicit"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["value"]["milk"] is True
+    assert client.delete("/v1/preferences/coffee", params={"user_id": "local-user"}).status_code == 204
+    assert client.get("/v1/preferences", params={"user_id": "local-user"}).json() == []
+
+    monkeypatch.setattr(settings, "step_functions_enabled", True)
+    monkeypatch.setattr(main, "get_planning_execution", lambda arn, user: {"execution_arn": arn, "user_id": user, "status": "SUCCEEDED"})
+    status = client.get(
+        "/v1/workflows/status",
+        params={"execution_arn": "arn:local:test", "user_id": "local-user"},
+    )
+    assert status.status_code == 200
+    assert status.json()["status"] == "SUCCEEDED"

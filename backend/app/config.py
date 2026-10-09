@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr
 
 class Settings(BaseSettings):
     environment: str = "development"
@@ -12,6 +13,9 @@ class Settings(BaseSettings):
     cognito_app_client_id: str = ""
     auth_required: bool = False
     bedrock_model_id: str = ""
+    openai_api_key: SecretStr | None = None
+    openai_base_url: str = ""
+    openai_project_id: str = ""
     step_functions_state_machine_arn: str = ""
     step_functions_enabled: bool = False
     strands_agent_enabled: bool = False
@@ -25,5 +29,9 @@ class Settings(BaseSettings):
     @property
     def origins(self):
         return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
+
+    @property
+    def mantle_enabled(self):
+        return bool(self.openai_api_key and self.openai_api_key.get_secret_value() and self.openai_base_url)
 
 settings = Settings()
