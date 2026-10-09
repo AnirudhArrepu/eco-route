@@ -1,11 +1,12 @@
 from datetime import date, datetime
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class Location(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     id: str | None = None
-    latitude: float
-    longitude: float
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
     label: str | None = None
 
 class ConstraintIn(BaseModel):
@@ -14,7 +15,14 @@ class ConstraintIn(BaseModel):
     weight: float = 1.0
     parameters: dict[str, Any] = Field(default_factory=dict)
 
+class RoutineIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    weekday: int = Field(ge=0, le=6)
+    stop: "StopIn"
+    active: bool = True
+
 class StopIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     id: str | None = None
     title: str
     type: str = "errand"
@@ -41,6 +49,7 @@ class ScheduleCreate(BaseModel):
     end_location: Location
     stops: list[StopIn] = Field(default_factory=list)
     constraints: list[ConstraintIn] = Field(default_factory=list)
+    include_routines: bool = True
 
 class AddStopRequest(BaseModel):
     user_id: str
@@ -62,6 +71,19 @@ class AgentRequest(BaseModel):
     text: str
     schedule_id: str | None = None
     timezone: str = "UTC"
+
+class PreferenceUpdate(BaseModel):
+    value: dict[str, Any]
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    source: str = "explicit"
+
+class RoutineCreate(BaseModel):
+    user_id: str
+    routine: RoutineIn
+
+class RoutineUpdate(BaseModel):
+    user_id: str
+    routine: RoutineIn
 
 class ApproveRequest(BaseModel):
     user_id: str

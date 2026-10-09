@@ -60,6 +60,16 @@ class Preference(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (UniqueConstraint("user_id", "key", name="uq_preference_user_key"),)
 
+class Routine(Base):
+    __tablename__ = "routines"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    weekday: Mapped[int] = mapped_column(Integer)
+    stop: Mapped[dict] = mapped_column(JSON)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
 class Proposal(Base):
     __tablename__ = "plan_proposals"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

@@ -62,6 +62,16 @@ def parse_intent(text, timezone="UTC"):
             return parsed
         except (ValueError, json.JSONDecodeError) as exc:
             raise HTTPException(502,"Bedrock returned an invalid intent response") from exc
-    low=text.lower()
-    op="replan" if any(x in low for x in ("replan","reschedule","meeting moved")) else "create_schedule" if "create a schedule" in low else "add_destination"
-    return {"operation":op,"destination_query":text,"clarification_needed":False,"clarification_question":None}
+    import re
+    low=text.lower().strip()
+    if not low:
+        return {"operation":"clarify","destination_query":None,"clarification_needed":True,"clarification_question":"What would you like to plan or change?"}
+    if any(x in low for x in ("replan","reschedule","meeting moved","meeting extended","running late")):
+        return {"operation":"replan","destination_query":None,"clarification_needed":False,"clarification_question":None}
+    if any(x in low for x in ("create a schedule","plan my day","make a schedule","schedule for tomorrow","schedule for today")):
+        return {"operation":"create_schedule","destination_query":None,"clarification_needed":False,"clarification_question":None}
+    budget_match=re.search(r"(?:under|below|maximum|max(?:imum)?(?: of)?|budget(?: of)?)\s*(?:₹|rs\.?\s*)?([\d,]+)",text,re.IGNORECASE)
+    query=text
+    if budget_match:
+        query=(text[:budget_match.start()] + text[budget_match.end():]).strip(" ,.;")
+    return {"operation":"add_destination","destination_query":query,"budget_inr":int(budget_match.group(1).replace(",","")) if budget_match else None,"clarification_needed":False,"clarification_question":None,"verification_note":"Place search does not verify product stock or price."}

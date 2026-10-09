@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     location_route_calculator_name: str = ""
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
     proposal_ttl_minutes: int = 30
+    auto_migrate: bool = True
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     @property
     def origins(self):

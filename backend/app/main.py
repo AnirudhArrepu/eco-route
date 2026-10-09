@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -6,13 +7,18 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import Base, engine, get_db
 from app import models
-from app.schemas import ScheduleCreate, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn
+from app.schemas import ScheduleCreate, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate
 from app.service import create_schedule, get_schedule, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid
 from app.integrations import parse_intent, search_places
 
 @asynccontextmanager
 async def lifespan(app):
-    Base.metadata.create_all(bind=engine)
+    if settings.auto_migrate:
+        from alembic import command
+        from alembic.config import Config
+        migration_config=Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+        migration_config.set_main_option("sqlalchemy.url",settings.database_url.replace("%","%%"))
+        command.upgrade(migration_config,"head")
     yield
 
 app=FastAPI(title="EcoRoute API",version="0.1.0",lifespan=lifespan)
@@ -25,6 +31,14 @@ def proposal_json(p):
 def root(): return {"name":"EcoRoute API","docs":"/docs"}
 @app.get("/health")
 def health(): return {"status":"ok"}
+
+@app.get("/ready")
+def ready(db:Session=Depends(get_db)):
+    try:
+        db.execute(select(1))
+    except Exception as exc:
+        raise HTTPException(503,"Database is unavailable") from exc
+    return {"status":"ready"}
 
 @app.post("/v1/schedules")
 def create(req:ScheduleCreate,db:Session=Depends(get_db)):
@@ -97,3 +111,47 @@ def set_preference(req:PreferenceIn,db:Session=Depends(get_db)):
         row=models.Preference(id=uid(),user_id=req.user_id,key=req.key,value=req.value,confidence=req.confidence,source=req.source); db.add(row)
     db.commit()
     return {"id":row.id,"user_id":row.user_id,"key":row.key,"value":row.value,"confidence":row.confidence,"source":row.source}
+
+@app.put("/v1/preferences/{key}")
+def update_preference(key:str,req:PreferenceUpdate,user_id:str,db:Session=Depends(get_db)):
+    row=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key==key))
+    if not row:
+        raise HTTPException(404,"Preference not found")
+    row.value=req.value; row.confidence=req.confidence; row.source=req.source
+    db.commit()
+    return {"id":row.id,"key":row.key,"value":row.value,"confidence":row.confidence,"source":row.source,"updated_at":row.updated_at.isoformat()}
+
+@app.delete("/v1/preferences/{key}",status_code=204)
+def delete_preference(key:str,user_id:str,db:Session=Depends(get_db)):
+    row=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key==key))
+    if not row:
+        raise HTTPException(404,"Preference not found")
+    db.delete(row); db.commit()
+
+@app.get("/v1/routines")
+def routines(user_id:str,db:Session=Depends(get_db)):
+    rows=db.scalars(select(models.Routine).where(models.Routine.user_id==user_id).order_by(models.Routine.weekday,models.Routine.name)).all()
+    return [{"id":r.id,"name":r.name,"weekday":r.weekday,"stop":r.stop,"active":r.active,"created_at":r.created_at.isoformat()} for r in rows]
+
+@app.post("/v1/routines",status_code=201)
+def create_routine(req:RoutineCreate,db:Session=Depends(get_db)):
+    r=req.routine
+    row=models.Routine(id=uid(),user_id=req.user_id,name=r.name,weekday=r.weekday,stop=r.stop.model_dump(mode="json",exclude={"id"}),active=r.active)
+    db.add(row); db.commit(); db.refresh(row)
+    return {"id":row.id,"name":row.name,"weekday":row.weekday,"stop":row.stop,"active":row.active}
+
+@app.put("/v1/routines/{routine_id}")
+def update_routine(routine_id:str,req:RoutineUpdate,db:Session=Depends(get_db)):
+    row=db.scalar(select(models.Routine).where(models.Routine.id==routine_id,models.Routine.user_id==req.user_id))
+    if not row:
+        raise HTTPException(404,"Routine not found")
+    row.name=req.routine.name; row.weekday=req.routine.weekday; row.stop=req.routine.stop.model_dump(mode="json",exclude={"id"}); row.active=req.routine.active
+    db.commit()
+    return {"id":row.id,"name":row.name,"weekday":row.weekday,"stop":row.stop,"active":row.active}
+
+@app.delete("/v1/routines/{routine_id}",status_code=204)
+def delete_routine(routine_id:str,user_id:str,db:Session=Depends(get_db)):
+    row=db.scalar(select(models.Routine).where(models.Routine.id==routine_id,models.Routine.user_id==user_id))
+    if not row:
+        raise HTTPException(404,"Routine not found")
+    db.delete(row); db.commit()

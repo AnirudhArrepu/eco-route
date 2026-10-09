@@ -10,6 +10,8 @@ from app.planner import plan
 from app.integrations import TravelProvider
 from app.config import settings
 
+TRAVEL_MODES = {"walking": "Walking", "bicycle": "Bicycle", "car": "Car"}
+
 def uid(): return str(uuid4())
 
 def stop_dict(s, index):
@@ -36,11 +38,29 @@ def create_schedule(db,req:ScheduleCreate):
             if value is not None and value.tzinfo is None: raise HTTPException(422,f"{name} must include a timezone")
         if stop.earliest_start and stop.latest_start and stop.earliest_start>stop.latest_start:
             raise HTTPException(422,"earliest_start must not be after latest_start")
+    stops=list(req.stops)
+    if req.include_routines:
+        routines=db.scalars(select(models.Routine).where(models.Routine.user_id==req.user_id,models.Routine.weekday==req.date.weekday(),models.Routine.active.is_(True))).all()
+        present={st.id for st in stops if st.id}
+        for routine in routines:
+            routine_stop=StopIn.model_validate(routine.stop)
+            routine_stop.id=routine_stop.id or f"routine-{routine.id}"
+            if routine_stop.id not in present:
+                stops.append(routine_stop)
+    prepared=[input_stop(stop) for stop in stops]
+    if len({stop["id"] for stop in prepared}) != len(prepared):
+        raise HTTPException(422,"Stop ids must be unique within a schedule")
+    constraints=[constraint.model_dump() for constraint in req.constraints]
+    try:
+        validation=plan({"start_at":req.start_at,"end_at":req.end_at,"start_location":req.start_location.model_dump(mode="json"),"end_location":req.end_location.model_dump(mode="json"),"existing_stops":prepared,"candidate_stops":[],"constraints":constraints},TravelProvider(),user_travel_mode(db,req.user_id))
+    except Exception as exc:
+        raise HTTPException(502,"Travel provider failed to validate the schedule") from exc
+    if not validation["feasible"]:
+        raise HTTPException(422,{"message":"Schedule violates hard planning constraints","conflicts":validation["conflicts"]})
     sid=uid()
     s=models.Schedule(id=sid,user_id=req.user_id,schedule_date=req.date,timezone=req.timezone,start_at=req.start_at,end_at=req.end_at,start_location=req.start_location.model_dump(mode="json"),end_location=req.end_location.model_dump(mode="json"),current_revision=1,status="active")
     db.add(s); db.flush()
-    for i,st in enumerate(req.stops):
-        d=input_stop(st)
+    for i,(st,d) in enumerate(zip(stops,prepared)):
         db.add(models.Stop(id=d["id"],schedule_id=sid,order_index=i,title=d["title"],type=d["type"],location=d["location"],duration_minutes=d["duration_minutes"],earliest_start=st.earliest_start,latest_start=st.latest_start,latest_end=st.latest_end,fixed_start=st.fixed_start,opening_hours=d["opening_hours"],priority=d["priority"],mandatory=d["mandatory"],status=d["status"],source=d["source"],attributes=d["attributes"]))
     for c in req.constraints:
         db.add(models.ScheduleConstraint(id=uid(),schedule_id=sid,type=c.type,hardness=c.hardness,weight=c.weight,parameters=c.parameters))
@@ -54,11 +74,16 @@ def get_schedule(db,sid,user_id):
     if not s or s.user_id!=user_id: raise HTTPException(404,"Schedule not found")
     return s
 
+def user_travel_mode(db,user_id):
+    preference=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key=="travel_mode"))
+    requested=(preference.value or {}).get("mode", "Walking") if preference else "Walking"
+    return TRAVEL_MODES.get(str(requested).lower(),"Walking")
+
 def make_plan_request(db,s,existing,candidates,constraints,allow_reorder,max_reorder):
     stored=db.scalars(select(models.ScheduleConstraint).where(models.ScheduleConstraint.schedule_id==s.id)).all()
     cs=[{"type":c.type,"hardness":c.hardness,"weight":c.weight,"parameters":c.parameters or {}} for c in stored]
     cs += [c.model_dump() for c in constraints]
-    return {"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":existing,"candidate_stops":candidates,"constraints":cs,"allow_reordering_flexible_stops":allow_reorder,"max_reordered_stops":max_reorder,"max_candidate_evaluations":500,"weights":{"travel_time":5,"distance":1,"disruption":4}}
+    return {"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":existing,"candidate_stops":candidates,"constraints":cs,"allow_reordering_flexible_stops":allow_reorder,"max_reordered_stops":max_reorder,"max_candidate_evaluations":500,"preferred_travel_mode":user_travel_mode(db,s.user_id),"weights":{"travel_time":5,"distance":1,"disruption":4}}
 
 def save_proposal(db,s,user_id,operation,result):
     p=models.Proposal(id=uid(),schedule_id=s.id,user_id=user_id,base_revision=s.current_revision,status="pending" if result["feasible"] else "infeasible",operation=operation,proposed_stops=[stop_dict(x,i) for i,x in enumerate(result["stops"])],metrics=result["metrics"],conflicts=result["conflicts"],explanation_facts=result["explanation_facts"],created_at=datetime.now(timezone.utc),expires_at=datetime.now(timezone.utc)+timedelta(minutes=settings.proposal_ttl_minutes))
@@ -71,7 +96,7 @@ def add_destination(db,sid,req:AddStopRequest):
     dest=input_stop(req.destination)
     r=make_plan_request(db,s,existing,[dest],req.constraints,req.allow_reordering_flexible_stops,req.max_reordered_stops)
     try:
-        result=plan(r,TravelProvider())
+        result=plan(r,TravelProvider(),r["preferred_travel_mode"])
     except Exception as exc:
         raise HTTPException(502,"Travel provider failed to calculate a route") from exc
     return save_proposal(db,s,req.user_id,"add_destination",result)
@@ -89,7 +114,7 @@ def replan(db,sid,req:ReplanRequest):
             found[k]=v.isoformat() if isinstance(v,datetime) else v
     r=make_plan_request(db,s,existing,[],req.constraints,req.allow_reordering_flexible_stops,req.max_reordered_stops)
     try:
-        result=plan(r,TravelProvider())
+        result=plan(r,TravelProvider(),r["preferred_travel_mode"])
     except Exception as exc:
         raise HTTPException(502,"Travel provider failed to calculate a route") from exc
     return save_proposal(db,s,req.user_id,"replan",result)
@@ -116,15 +141,16 @@ def approve(db,p,req):
     try:
         latest=db.scalar(select(models.Proposal).where(models.Proposal.id==p.id).with_for_update())
         if not latest or latest.status!="pending": raise HTTPException(409,"Proposal is no longer pending")
-        from app.planner import plan, TravelProvider
+        from app.planner import plan
         constraints=db.scalars(select(models.ScheduleConstraint).where(models.ScheduleConstraint.schedule_id==s.id)).all()
         current_rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==s.id).order_by(models.Stop.order_index)).all()
         existing=[row_stop(x) for x in current_rows]
         proposed=p.proposed_stops
         # Revalidate against current persisted constraints and travel estimates immediately before commit.
-        validation=plan({"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":existing,"candidate_stops":[],"constraints":[{"type":c.type,"hardness":c.hardness,"parameters":c.parameters or {}} for c in constraints]},TravelProvider())
+        mode=user_travel_mode(db,req.user_id)
+        validation=plan({"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":existing,"candidate_stops":[],"constraints":[{"type":c.type,"hardness":c.hardness,"parameters":c.parameters or {}} for c in constraints]},TravelProvider(),mode)
         if not validation["feasible"]: raise HTTPException(409,"Current schedule is no longer feasible")
-        proposed_validation=plan({"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":proposed,"candidate_stops":[],"constraints":[{"type":c.type,"hardness":c.hardness,"parameters":c.parameters or {}} for c in constraints]},TravelProvider())
+        proposed_validation=plan({"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":proposed,"candidate_stops":[],"constraints":[{"type":c.type,"hardness":c.hardness,"parameters":c.parameters or {}} for c in constraints]},TravelProvider(),mode)
         if not proposed_validation["feasible"]: raise HTTPException(409,"Proposed schedule failed validation")
         p.idempotency_key=req.idempotency_key
         s.current_revision=p.base_revision+1
