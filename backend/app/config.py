@@ -5,7 +5,14 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./ecoroute.db"
     aws_region: str = "ap-south-1"
     aws_integrations_enabled: bool = False
+    cognito_user_pool_id: str = ""
+    cognito_app_client_id: str = ""
+    auth_required: bool = False
     bedrock_model_id: str = ""
+    step_functions_state_machine_arn: str = ""
+    step_functions_enabled: bool = False
+    strands_agent_enabled: bool = False
+    strands_max_tool_calls: int = 8
     location_index_name: str = ""
     location_route_calculator_name: str = ""
     cors_origins: str = "http://localhost:3000,http://localhost:5173"

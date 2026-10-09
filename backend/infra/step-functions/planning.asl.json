@@ -1,0 +1,146 @@
+{
+  "Comment": "Interpret a user request, discover places or prepare a replan proposal, and return without committing schedule changes.",
+  "StartAt": "InterpretRequest",
+  "States": {
+    "InterpretRequest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${workflow_lambda_arn}",
+        "Payload": {
+          "action": "interpret",
+          "user_id.$": "$.user_id",
+          "request_text.$": "$.request_text",
+          "schedule_id.$": "$.schedule_id",
+          "timezone.$": "$.timezone",
+          "request_id.$": "$.request_id"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Next": "ChooseOperation"
+    },
+    "ChooseOperation": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.intent.clarification_needed",
+          "BooleanEquals": true,
+          "Next": "ClarificationRequired"
+        },
+        {
+          "Variable": "$.intent.operation",
+          "StringEquals": "add_destination",
+          "Next": "CheckScheduleForPlaces"
+        },
+        {
+          "Variable": "$.intent.operation",
+          "StringEquals": "replan",
+          "Next": "CheckScheduleForReplan"
+        },
+        {
+          "Variable": "$.intent.operation",
+          "StringEquals": "create_schedule",
+          "Next": "ScheduleDetailsRequired"
+        }
+      ],
+      "Default": "ClarificationRequired"
+    },
+    "CheckScheduleForPlaces": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.schedule_id", "IsPresent": true, "IsNull": false, "Next": "DiscoverPlaces"}
+      ],
+      "Default": "ScheduleIdRequired"
+    },
+    "CheckScheduleForReplan": {
+      "Type": "Choice",
+      "Choices": [
+        {"Variable": "$.schedule_id", "IsPresent": true, "IsNull": false, "Next": "CreateReplanProposal"}
+      ],
+      "Default": "ScheduleIdRequired"
+    },
+    "DiscoverPlaces": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${workflow_lambda_arn}",
+        "Payload": {
+          "action": "discover",
+          "user_id.$": "$.user_id",
+          "request_text.$": "$.request_text",
+          "schedule_id.$": "$.schedule_id",
+          "timezone.$": "$.timezone",
+          "intent.$": "$.intent"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "End": true
+    },
+    "CreateReplanProposal": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${workflow_lambda_arn}",
+        "Payload": {
+          "action": "replan",
+          "user_id.$": "$.user_id",
+          "request_text.$": "$.request_text",
+          "schedule_id.$": "$.schedule_id"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "End": true
+    },
+    "ClarificationRequired": {
+      "Type": "Pass",
+      "Parameters": {
+        "status": "clarification_required",
+        "intent.$": "$.intent",
+        "question.$": "$.intent.clarification_question"
+      },
+      "End": true
+    },
+    "ScheduleDetailsRequired": {
+      "Type": "Pass",
+      "Parameters": {
+        "status": "clarification_required",
+        "intent.$": "$.intent",
+        "question": "Provide a schedule date, time window, start and end locations, and any fixed appointments."
+      },
+      "End": true
+    },
+    "ScheduleIdRequired": {
+      "Type": "Pass",
+      "Parameters": {
+        "status": "clarification_required",
+        "intent.$": "$.intent",
+        "question": "Provide the schedule_id to search places or replan an existing itinerary."
+      },
+      "End": true
+    }
+  }
+}

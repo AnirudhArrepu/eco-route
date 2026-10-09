@@ -10,6 +10,9 @@ from app import models
 from app.schemas import ScheduleCreate, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate
 from app.service import create_schedule, get_schedule, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid
 from app.integrations import parse_intent, search_places
+from app.auth import authenticated_user, resolve_user_id
+from app.strands_agent import interpret_with_strands
+from app.workflows import start_planning_execution, get_planning_execution
 
 @asynccontextmanager
 async def lifespan(app):
@@ -27,6 +30,9 @@ app.add_middleware(CORSMiddleware,allow_origins=settings.origins,allow_credentia
 def proposal_json(p):
     return {"id":p.id,"schedule_id":p.schedule_id,"status":p.status,"feasible":p.status in ("pending","approved"),"base_revision":p.base_revision,"proposed_stops":p.proposed_stops,"metrics":p.metrics,"conflicts":p.conflicts,"explanation_facts":p.explanation_facts,"expires_at":p.expires_at.isoformat()}
 
+def owner(user_id, principal):
+    return resolve_user_id(user_id, principal)
+
 @app.get("/")
 def root(): return {"name":"EcoRoute API","docs":"/docs"}
 @app.get("/health")
@@ -41,28 +47,42 @@ def ready(db:Session=Depends(get_db)):
     return {"status":"ready"}
 
 @app.post("/v1/schedules")
-def create(req:ScheduleCreate,db:Session=Depends(get_db)):
+def create(req:ScheduleCreate,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     s=create_schedule(db,req)
     return {"id":s.id,"user_id":s.user_id,"date":s.schedule_date.isoformat(),"current_revision":s.current_revision,"status":s.status}
 
 @app.get("/v1/schedules/{sid}")
-def read_schedule(sid:str,user_id:str,db:Session=Depends(get_db)):
+def read_schedule(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     s=get_schedule(db,sid,user_id)
     rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==sid).order_by(models.Stop.order_index)).all()
     cs=db.scalars(select(models.ScheduleConstraint).where(models.ScheduleConstraint.schedule_id==sid)).all()
     return {"id":s.id,"user_id":s.user_id,"date":s.schedule_date.isoformat(),"timezone":s.timezone,"start_at":s.start_at.isoformat(),"end_at":s.end_at.isoformat(),"start_location":s.start_location,"end_location":s.end_location,"status":s.status,"current_revision":s.current_revision,"stops":[row_stop(x) for x in rows],"constraints":[{"type":c.type,"hardness":c.hardness,"weight":c.weight,"parameters":c.parameters} for c in cs]}
 
 @app.post("/v1/schedules/{sid}/stops")
-def add_stop(sid:str,req:AddStopRequest,db:Session=Depends(get_db)):
+def add_stop(sid:str,req:AddStopRequest,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     return proposal_json(add_destination(db,sid,req))
 
 @app.post("/v1/schedules/{sid}/replan")
-def replan_route(sid:str,req:ReplanRequest,db:Session=Depends(get_db)):
+def replan_route(sid:str,req:ReplanRequest,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     return proposal_json(replan(db,sid,req))
 
 @app.post("/v1/agent/requests")
-def agent(req:AgentRequest,db:Session=Depends(get_db)):
-    intent=parse_intent(req.text,req.timezone)
+def agent(req:AgentRequest,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
+    if settings.step_functions_enabled:
+        return start_planning_execution(user_id=req.user_id,text=req.text,schedule_id=req.schedule_id,timezone=req.timezone)
+    if settings.strands_agent_enabled:
+        bias=None
+        if req.schedule_id:
+            schedule=get_schedule(db,req.schedule_id,req.user_id)
+            bias=[schedule.start_location["longitude"],schedule.start_location["latitude"]]
+        intent=interpret_with_strands(req.text,req.timezone,bias)
+    else:
+        intent=parse_intent(req.text,req.timezone)
     if intent.get("clarification_needed"):
         return {"status":"clarification_required","question":intent.get("clarification_question"),"intent":intent}
     op=intent.get("operation","clarify")
@@ -78,32 +98,38 @@ def agent(req:AgentRequest,db:Session=Depends(get_db)):
     return {"status":"clarification_required","question":"Create a schedule first, then provide its schedule_id to add destinations or replan.","intent":intent}
 
 @app.get("/v1/proposals/{pid}")
-def read_proposal(pid:str,user_id:str,db:Session=Depends(get_db)):
+def read_proposal(pid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     return proposal_json(get_proposal(db,pid,user_id))
 
 @app.post("/v1/proposals/{pid}/approve")
-def approve_route(pid:str,req:ApproveRequest,db:Session=Depends(get_db)):
+def approve_route(pid:str,req:ApproveRequest,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     p=get_proposal(db,pid,req.user_id)
     return approve(db,p,req)
 
 @app.post("/v1/proposals/{pid}/reject")
-def reject_route(pid:str,req:RejectRequest,db:Session=Depends(get_db)):
+def reject_route(pid:str,req:RejectRequest,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     p=get_proposal(db,pid,req.user_id)
     return reject(db,p,req.reason)
 
 @app.get("/v1/schedules/{sid}/revisions")
-def revisions(sid:str,user_id:str,db:Session=Depends(get_db)):
+def revisions(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     s=get_schedule(db,sid,user_id)
     rows=db.scalars(select(models.PlanRevision).where(models.PlanRevision.schedule_id==sid).order_by(models.PlanRevision.revision_number.desc())).all()
     return [{"id":r.id,"revision_number":r.revision_number,"snapshot":r.snapshot,"reason":r.reason,"created_at":r.created_at.isoformat()} for r in rows]
 
 @app.get("/v1/preferences")
-def preferences(user_id:str,db:Session=Depends(get_db)):
+def preferences(user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     rows=db.scalars(select(models.Preference).where(models.Preference.user_id==user_id)).all()
     return [{"id":r.id,"key":r.key,"value":r.value,"confidence":r.confidence,"source":r.source,"updated_at":r.updated_at.isoformat()} for r in rows]
 
 @app.post("/v1/preferences")
-def set_preference(req:PreferenceIn,db:Session=Depends(get_db)):
+def set_preference(req:PreferenceIn,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     row=db.scalar(select(models.Preference).where(models.Preference.user_id==req.user_id,models.Preference.key==req.key))
     if row:
         row.value=req.value; row.confidence=req.confidence; row.source=req.source
@@ -113,7 +139,8 @@ def set_preference(req:PreferenceIn,db:Session=Depends(get_db)):
     return {"id":row.id,"user_id":row.user_id,"key":row.key,"value":row.value,"confidence":row.confidence,"source":row.source}
 
 @app.put("/v1/preferences/{key}")
-def update_preference(key:str,req:PreferenceUpdate,user_id:str,db:Session=Depends(get_db)):
+def update_preference(key:str,req:PreferenceUpdate,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     row=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key==key))
     if not row:
         raise HTTPException(404,"Preference not found")
@@ -122,26 +149,30 @@ def update_preference(key:str,req:PreferenceUpdate,user_id:str,db:Session=Depend
     return {"id":row.id,"key":row.key,"value":row.value,"confidence":row.confidence,"source":row.source,"updated_at":row.updated_at.isoformat()}
 
 @app.delete("/v1/preferences/{key}",status_code=204)
-def delete_preference(key:str,user_id:str,db:Session=Depends(get_db)):
+def delete_preference(key:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     row=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key==key))
     if not row:
         raise HTTPException(404,"Preference not found")
     db.delete(row); db.commit()
 
 @app.get("/v1/routines")
-def routines(user_id:str,db:Session=Depends(get_db)):
+def routines(user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     rows=db.scalars(select(models.Routine).where(models.Routine.user_id==user_id).order_by(models.Routine.weekday,models.Routine.name)).all()
     return [{"id":r.id,"name":r.name,"weekday":r.weekday,"stop":r.stop,"active":r.active,"created_at":r.created_at.isoformat()} for r in rows]
 
 @app.post("/v1/routines",status_code=201)
-def create_routine(req:RoutineCreate,db:Session=Depends(get_db)):
+def create_routine(req:RoutineCreate,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     r=req.routine
     row=models.Routine(id=uid(),user_id=req.user_id,name=r.name,weekday=r.weekday,stop=r.stop.model_dump(mode="json",exclude={"id"}),active=r.active)
     db.add(row); db.commit(); db.refresh(row)
     return {"id":row.id,"name":row.name,"weekday":row.weekday,"stop":row.stop,"active":row.active}
 
 @app.put("/v1/routines/{routine_id}")
-def update_routine(routine_id:str,req:RoutineUpdate,db:Session=Depends(get_db)):
+def update_routine(routine_id:str,req:RoutineUpdate,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     row=db.scalar(select(models.Routine).where(models.Routine.id==routine_id,models.Routine.user_id==req.user_id))
     if not row:
         raise HTTPException(404,"Routine not found")
@@ -150,8 +181,14 @@ def update_routine(routine_id:str,req:RoutineUpdate,db:Session=Depends(get_db)):
     return {"id":row.id,"name":row.name,"weekday":row.weekday,"stop":row.stop,"active":row.active}
 
 @app.delete("/v1/routines/{routine_id}",status_code=204)
-def delete_routine(routine_id:str,user_id:str,db:Session=Depends(get_db)):
+def delete_routine(routine_id:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
     row=db.scalar(select(models.Routine).where(models.Routine.id==routine_id,models.Routine.user_id==user_id))
     if not row:
         raise HTTPException(404,"Routine not found")
     db.delete(row); db.commit()
+
+@app.get("/v1/workflows/status")
+def workflow_status(execution_arn:str,user_id:str,principal:str|None=Depends(authenticated_user)):
+    user_id=owner(user_id,principal)
+    return get_planning_execution(execution_arn,user_id)
