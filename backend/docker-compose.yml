@@ -1,0 +1,23 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://ecoroute:ecoroute@postgres:5432/ecoroute
+      AWS_REGION: ap-south-1
+      AWS_INTEGRATIONS_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ecoroute
+      POSTGRES_USER: ecoroute
+      POSTGRES_PASSWORD: ecoroute
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U ecoroute -d ecoroute"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
