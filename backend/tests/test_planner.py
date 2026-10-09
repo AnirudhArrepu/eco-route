@@ -13,3 +13,30 @@ def test_add_stop():
 def test_empty_schedule_is_feasible():
     result=plan(req([],[]),MockTravelProvider())
     assert result["feasible"]
+
+def test_fixed_start_outside_latest_window_is_infeasible():
+    item=stop("fixed",13.0,80.2,30,dt(10))
+    item["latest_start"] = dt(9, 30).isoformat()
+    result=plan(req([item],[]),MockTravelProvider())
+    assert not result["feasible"]
+    assert any(x["constraint_type"]=="time_window" for x in result["conflicts"])
+
+def test_max_travel_constraint_includes_return_leg():
+    request=req([], [stop("shop",13.02,80.22)])
+    request["constraints"]=[{"type":"max_travel_minutes","hardness":"hard","parameters":{"minutes":1}}]
+    result=plan(request,MockTravelProvider())
+    assert not result["feasible"]
+
+def test_naive_stop_time_is_rejected_for_aware_schedule():
+    item=stop("shop",13.0,80.2)
+    item["earliest_start"]="2026-10-09T10:00:00"
+    result=plan(req([item],[]),MockTravelProvider())
+    assert not result["feasible"]
+    assert any(x["constraint_type"]=="invalid_input" for x in result["conflicts"])
+
+def test_candidate_evaluation_limit_zero_returns_structured_conflict():
+    request=req([], [stop("shop",13.02,80.22)])
+    request["max_candidate_evaluations"]=0
+    result=plan(request,MockTravelProvider())
+    assert not result["feasible"]
+    assert result["conflicts"][0]["constraint_type"]=="candidate_limit"

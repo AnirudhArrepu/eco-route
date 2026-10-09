@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    environment: str = "development"
     database_url: str = "sqlite:///./ecoroute.db"
     aws_region: str = "ap-south-1"
     aws_integrations_enabled: bool = False

@@ -1,10 +1,12 @@
 import boto3
+from botocore.config import Config
 from app.config import settings
 from app.planner import MockTravelProvider, Leg
+from fastapi import HTTPException
 
 class AmazonLocation:
     def __init__(self):
-        self.client = boto3.client("geo", region_name=settings.aws_region)
+        self.client = boto3.client("geo", region_name=settings.aws_region, config=Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 2}))
     def search(self, text, bias=None, max_results=10):
         args={"IndexName":settings.location_index_name,"Text":text,"MaxResults":min(max(1,max_results),20)}
         if bias: args["BiasPosition"]=bias
@@ -23,17 +25,29 @@ class AmazonLocation:
 class TravelProvider:
     def __init__(self):
         self.mock=MockTravelProvider()
-        self.aws=AmazonLocation() if settings.aws_integrations_enabled and settings.location_route_calculator_name else None
+        self.aws=AmazonLocation() if settings.aws_integrations_enabled else None
     def leg(self,a,b,mode="Walking"):
-        return self.aws.route(a,b,mode) if self.aws else self.mock.leg(a,b,mode)
+        if settings.aws_integrations_enabled:
+            if not settings.location_route_calculator_name:
+                raise RuntimeError("LOCATION_ROUTE_CALCULATOR_NAME is required when AWS integrations are enabled")
+            return self.aws.route(a,b,mode)
+        if settings.environment == "production":
+            raise RuntimeError("Live Amazon Location routing must be configured in production")
+        return self.mock.leg(a,b,mode)
 
 def search_places(text,bias=None,max_results=10):
-    if not (settings.aws_integrations_enabled and settings.location_index_name): return []
-    return AmazonLocation().search(text,bias,max_results)
+    if not settings.aws_integrations_enabled:
+        return []
+    if not settings.location_index_name:
+        raise HTTPException(503,"LOCATION_INDEX_NAME is required when AWS integrations are enabled")
+    try:
+        return AmazonLocation().search(text,bias,max_results)
+    except Exception as exc:
+        raise HTTPException(502,"Amazon Location place search failed") from exc
 
 def parse_intent(text, timezone="UTC"):
     if settings.aws_integrations_enabled and settings.bedrock_model_id:
-        client=boto3.client("bedrock-runtime",region_name=settings.aws_region)
+        client=boto3.client("bedrock-runtime",region_name=settings.aws_region,config=Config(connect_timeout=3,read_timeout=15,retries={"max_attempts":2}))
         prompt=("Return JSON only with keys operation,destination_query,clarification_needed,clarification_question. "
                 "Allowed operation: add_destination,replan,create_schedule,clarify. Never invent inventory or prices. "
                 f"Timezone={timezone}. User request={text}")
@@ -41,7 +55,13 @@ def parse_intent(text, timezone="UTC"):
         content=response["output"]["message"]["content"]
         raw="".join(x.get("text","") for x in content)
         import json
-        return json.loads(raw[raw.find("{"):raw.rfind("}")+1])
+        try:
+            parsed=json.loads(raw[raw.find("{"):raw.rfind("}")+1])
+            if not isinstance(parsed,dict) or parsed.get("operation") not in {"add_destination","replan","create_schedule","clarify"}:
+                raise ValueError("Unsupported intent response")
+            return parsed
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(502,"Bedrock returned an invalid intent response") from exc
     low=text.lower()
     op="replan" if any(x in low for x in ("replan","reschedule","meeting moved")) else "create_schedule" if "create a schedule" in low else "add_destination"
     return {"operation":op,"destination_query":text,"clarification_needed":False,"clarification_question":None}
