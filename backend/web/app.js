@@ -3,6 +3,18 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 const dateInput = $("#date");
+$("#api-base-url").value = localStorage.getItem("ecoroute.apiBase") || window.ECOROUTE_API_BASE || "";
+function apiUrl(path) {
+  const base = $("#api-base-url").value.trim().replace(/\/+$/, "") || window.location.origin;
+  return `${base}/${path.replace(/^\/+/, "")}`;
+}
+$("#save-api-base").addEventListener("click", () => {
+  const value = $("#api-base-url").value.trim().replace(/\/+$/, "");
+  if (value && !/^https?:\/\//i.test(value)) { authMessage("Enter an API URL beginning with http:// or https://.", true); return; }
+  if (value) localStorage.setItem("ecoroute.apiBase", value);
+  else localStorage.removeItem("ecoroute.apiBase");
+  authMessage(value ? "API Gateway endpoint saved for this browser." : "Using the current page origin for API requests.");
+});
 const tomorrow = new Date();
 tomorrow.setDate(tomorrow.getDate() + 1);
 dateInput.value = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
@@ -16,7 +28,17 @@ function headers(json = false) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, { ...options, headers: { ...headers(Boolean(options.body)), ...options.headers } });
+  const request = () => fetch(apiUrl(url), { ...options, headers: { ...headers(Boolean(options.body)), ...options.headers } });
+  let response = await request();
+  if (response.status === 401 && url !== "/v1/auth/refresh" && localStorage.getItem("ecoroute.refreshToken")) {
+    try {
+      const refreshed = await fetch(apiUrl("/v1/auth/refresh"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: localStorage.getItem("ecoroute.refreshToken") }) });
+      if (refreshed.ok) {
+        setAuthTokens(await refreshed.json());
+        response = await request();
+      }
+    } catch (_) {}
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = body.detail;
@@ -24,6 +46,85 @@ async function api(url, options = {}) {
   }
   return body;
 }
+
+function setAuthTokens(tokens) {
+  const idToken = tokens.id_token || localStorage.getItem("ecoroute.idToken") || "";
+  const accessToken = tokens.access_token || localStorage.getItem("ecoroute.accessToken") || "";
+  const refreshToken = tokens.refresh_token || localStorage.getItem("ecoroute.refreshToken") || "";
+  if (idToken) localStorage.setItem("ecoroute.idToken", idToken);
+  if (accessToken) localStorage.setItem("ecoroute.accessToken", accessToken);
+  if (refreshToken) localStorage.setItem("ecoroute.refreshToken", refreshToken);
+  $("#token").value = idToken || accessToken;
+  $("#sign-out").hidden = false;
+}
+
+function authMessage(text, error = false) {
+  const box = $("#auth-notice");
+  box.textContent = text;
+  box.hidden = false;
+  box.classList.toggle("error", error);
+}
+
+async function loadSignedInUser() {
+  $("#token").value = localStorage.getItem("ecoroute.idToken") || localStorage.getItem("ecoroute.accessToken") || "";
+  if (!$("#token").value) return;
+  try {
+    const current = await api("/v1/auth/me");
+    $("#user-id").value = current.user_id;
+    $("#sign-out").hidden = false;
+    authMessage(`Signed in · user ${current.user_id}`);
+  } catch (_) {
+    $("#token").value = "";
+    localStorage.removeItem("ecoroute.idToken");
+    localStorage.removeItem("ecoroute.accessToken");
+    localStorage.removeItem("ecoroute.refreshToken");
+    $("#user-id").value = "local-user";
+  }
+}
+
+$("#sign-up").addEventListener("click", async () => {
+  try {
+    const result = await api("/v1/auth/signup", { method: "POST", body: JSON.stringify({ email: $("#auth-email").value.trim(), password: $("#auth-password").value }) });
+    authMessage(result.confirmation_required ? "Account created. Check your email for the confirmation code." : "Account created. You can sign in.");
+  } catch (error) { authMessage(error.message, true); }
+});
+
+$("#confirm-sign-up").addEventListener("click", async () => {
+  try {
+    await api("/v1/auth/confirm", { method: "POST", body: JSON.stringify({ email: $("#auth-email").value.trim(), code: $("#auth-code").value.trim() }) });
+    authMessage("Email confirmed. Sign in to continue.");
+  } catch (error) { authMessage(error.message, true); }
+});
+
+$("#resend-code").addEventListener("click", async () => {
+  try {
+    await api("/v1/auth/resend-confirmation", { method: "POST", body: JSON.stringify({ email: $("#auth-email").value.trim() }) });
+    authMessage("A new confirmation code was sent to your email.");
+  } catch (error) { authMessage(error.message, true); }
+});
+
+$("#sign-in").addEventListener("click", async () => {
+  try {
+    const tokens = await api("/v1/auth/login", { method: "POST", body: JSON.stringify({ email: $("#auth-email").value.trim(), password: $("#auth-password").value }) });
+    setAuthTokens(tokens);
+    const current = await api("/v1/auth/me");
+    $("#user-id").value = current.user_id;
+    $("#auth-password").value = "";
+    authMessage(`Signed in · user ${current.user_id}`);
+  } catch (error) { authMessage(error.message, true); }
+});
+
+$("#sign-out").addEventListener("click", () => {
+  localStorage.removeItem("ecoroute.idToken");
+  localStorage.removeItem("ecoroute.accessToken");
+  localStorage.removeItem("ecoroute.refreshToken");
+  $("#token").value = "";
+  $("#user-id").value = "local-user";
+  $("#sign-out").hidden = true;
+  authMessage("Signed out on this device.");
+});
+
+loadSignedInUser();
 
 function message(text, error = false) {
   const box = $("#notice");

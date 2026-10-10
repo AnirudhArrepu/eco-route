@@ -25,9 +25,30 @@
     <section class="planner-card" aria-labelledby="planner-heading">
       <div class="card-heading"><div><p class="eyebrow">NEW ITINERARY</p><h2 id="planner-heading">Plan your day</h2></div><span class="step-pill">01 / DETAILS</span></div>
       <form id="planner-form">
+        <div class="account-box">
+          <p class="eyebrow">YOUR ACCOUNT</p>
+          <div class="api-base-row">
+            <label class="field">API Gateway base URL <span>Leave blank when the planner and API share an origin</span><input id="api-base-url" type="url" placeholder="https://example.execute-api.ap-south-1.amazonaws.com/prod"></label>
+            <button id="save-api-base" type="button" class="secondary">Save endpoint</button>
+          </div>
+          <div class="field-row">
+            <label class="field">Email<input id="auth-email" type="email" autocomplete="email" placeholder="you@example.com"></label>
+            <label class="field">Password<input id="auth-password" type="password" autocomplete="current-password" placeholder="Your Cognito password"></label>
+          </div>
+          <div class="account-actions">
+            <button id="sign-up" type="button" class="secondary">Create account</button>
+            <button id="sign-in" type="button" class="primary">Sign in</button>
+            <button id="sign-out" type="button" class="secondary" hidden>Sign out</button>
+          </div>
+          <div class="field-row account-confirm">
+            <label class="field">Email confirmation code<input id="auth-code" autocomplete="one-time-code" placeholder="Code from your email"></label>
+            <div class="account-actions"><button id="confirm-sign-up" type="button" class="secondary">Confirm email</button><button id="resend-code" type="button" class="text-button">Resend code</button></div>
+          </div>
+          <div id="auth-notice" class="notice" role="status" aria-live="polite" hidden></div>
+        </div>
         <div class="identity-row">
-          <label class="field grow">User ID <span>Use your Cognito subject in production</span><input id="user-id" required value="local-user" autocomplete="username"></label>
-          <label class="field">Bearer token <span>Optional in local development</span><input id="token" type="password" autocomplete="off" placeholder="Cognito ID or access token"></label>
+          <label class="field grow">Database user ID <span>Filled from your signed-in Cognito account</span><input id="user-id" required value="local-user" readonly></label>
+          <input id="token" type="hidden">
         </div>
         <div class="field-row">
           <label class="field">Date<input id="date" type="date" required></label>

@@ -33,12 +33,25 @@ the backend does not silently substitute local estimates. With integrations disa
 deterministic straight-line travel provider is intended only for local development. Set
 `ENVIRONMENT=production` to make missing live route configuration fail closed.
 
-For Cognito, configure `COGNITO_USER_POOL_ID` and `COGNITO_APP_CLIENT_ID`, then set
-`AUTH_REQUIRED=true` (production mode requires authentication even if this flag is false). Send
-the Cognito ID or access token as `Authorization: Bearer <token>`. The API verifies its signature
-against the pool JWKS, issuer, expiry, token use, and app client. The authenticated `sub` must match
-the requested `user_id`; a client cannot use another user's ID. ECS needs outbound HTTPS access to
-the Cognito JWKS endpoint. The task role does not need Cognito API permissions for token checks.
+For Cognito, configure `COGNITO_USER_POOL_ID` and `COGNITO_APP_CLIENT_ID`; production mode
+requires authentication even if `AUTH_REQUIRED` is false. The planner supports `POST /v1/auth/signup`,
+`POST /v1/auth/confirm`, `POST /v1/auth/resend-confirmation`, `POST /v1/auth/login`, and
+`POST /v1/auth/refresh`. `GET /v1/auth/me` returns the signed-in Cognito subject as `user_id`.
+The web planner stores tokens in browser local storage and sends the ID token as a bearer token.
+Requests may omit `user_id` when authenticated; the API uses the verified Cognito `sub` as the
+database owner. If a request supplies a different user ID, it is rejected. For local development
+without authentication, requests still need an explicit `user_id`. The API verifies token signature,
+issuer, expiry, token use, and app client against the pool JWKS. The runtime needs outbound HTTPS
+access to the Cognito JWKS endpoint. Sign-up and sign-in use Cognito's public app-client operations;
+they do not require IAM permissions on the API role.
+
+For a Lambda and API Gateway deployment, package the API with `infra/lambda-requirements.txt` and
+set the Lambda handler to `app.lambda_handler.handler`. This API Lambda is separate from the
+Step Functions worker handler `app.workflow_worker.lambda_handler`.
+The planner served from `web/` lets you save the API Gateway base URL in the browser after the
+static files are uploaded to Amplify. Configure API Gateway CORS to allow all origins, methods,
+and headers as well; the FastAPI CORS middleware cannot answer preflight requests intercepted by
+the gateway itself.
 
 To route natural-language requests through the Strands agent, set `STRANDS_AGENT_ENABLED=true` and
 configure the Mantle credentials, model, and Amazon Location place index above. The agent uses the
@@ -61,7 +74,8 @@ Deploy `app.workflow_worker.lambda_handler` as that Lambda (with the same applic
 configuration), and grant its role only the database, Bedrock, and Amazon Location access needed
 by the workflow. The state machine role needs `lambda:InvokeFunction` on that worker. The sample
 definition retries transient Lambda service errors and separates place discovery from replan
-proposal generation.
+proposal generation. Give the worker role only the database-secret and Amazon Location permissions
+it needs, and provide its Bedrock Mantle API key through protected Lambda configuration.
 
 ## Current MVP boundaries
 The schedule planner validates hard appointment and time-window constraints before schedule creation,
@@ -83,6 +97,12 @@ The local development configuration uses SQLite and mock routing; it does not va
 permissions or resources. Local API and planner tests run with `python -m pytest -q`.
 
 ## Endpoints
+- `POST /v1/auth/signup`
+- `POST /v1/auth/confirm`
+- `POST /v1/auth/resend-confirmation`
+- `POST /v1/auth/login`
+- `POST /v1/auth/refresh`
+- `GET /v1/auth/me`
 - `POST /v1/schedules/preview`
 - `POST /v1/schedules`
 - `GET /v1/places/search?query=...&latitude=...&longitude=...`

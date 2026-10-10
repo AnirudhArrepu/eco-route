@@ -8,10 +8,11 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import Base, engine, get_db
 from app import models
-from app.schemas import ScheduleCreate, SchedulePreview, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate
+from app.schemas import ScheduleCreate, SchedulePreview, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate, SignUpRequest, ConfirmSignUpRequest, EmailRequest, LoginRequest, RefreshTokenRequest
 from app.service import create_schedule, preview_schedule, get_schedule, get_schedule_timeline, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid
 from app.integrations import parse_intent, search_places, infer_replan_updates
 from app.auth import authenticated_user, resolve_user_id
+from app import cognito
 from app.strands_agent import interpret_with_strands
 from app.workflows import start_planning_execution, get_planning_execution
 
@@ -26,7 +27,33 @@ async def lifespan(app):
     yield
 
 app=FastAPI(title="EcoRoute API",version="0.1.0",lifespan=lifespan)
-app.add_middleware(CORSMiddleware,allow_origins=settings.origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
+app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_credentials=False,allow_methods=["*"],allow_headers=["*"])
+
+@app.post("/v1/auth/signup")
+def auth_sign_up(req:SignUpRequest):
+    return cognito.sign_up(req.email,req.password)
+
+@app.post("/v1/auth/confirm")
+def auth_confirm(req:ConfirmSignUpRequest):
+    return cognito.confirm_sign_up(req.email,req.code)
+
+@app.post("/v1/auth/resend-confirmation")
+def auth_resend_confirmation(req:EmailRequest):
+    return cognito.resend_confirmation(req.email)
+
+@app.post("/v1/auth/login")
+def auth_login(req:LoginRequest):
+    return cognito.log_in(req.email,req.password)
+
+@app.post("/v1/auth/refresh")
+def auth_refresh(req:RefreshTokenRequest):
+    return cognito.refresh(req.refresh_token)
+
+@app.get("/v1/auth/me")
+def auth_me(principal:str|None=Depends(authenticated_user)):
+    if not principal:
+        raise HTTPException(401,"Sign in to get the current user")
+    return {"user_id":principal}
 
 def proposal_json(p):
     return {"id":p.id,"schedule_id":p.schedule_id,"status":p.status,"feasible":p.status in ("pending","approved"),"base_revision":p.base_revision,"proposed_stops":p.proposed_stops,"metrics":p.metrics,"conflicts":p.conflicts,"explanation_facts":p.explanation_facts,"expires_at":p.expires_at.isoformat()}
@@ -81,7 +108,7 @@ def place_search(query:str,latitude:float|None=None,longitude:float|None=None,pr
     return {"places":search_places(query,bias,10)}
 
 @app.get("/v1/schedules/{sid}")
-def read_schedule(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def read_schedule(sid:str,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     s=get_schedule(db,sid,user_id)
     rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==sid).order_by(models.Stop.order_index)).all()
@@ -89,7 +116,7 @@ def read_schedule(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|N
     return {"id":s.id,"user_id":s.user_id,"date":s.schedule_date.isoformat(),"timezone":s.timezone,"start_at":s.start_at.isoformat(),"end_at":s.end_at.isoformat(),"start_location":s.start_location,"end_location":s.end_location,"status":s.status,"current_revision":s.current_revision,"stops":[row_stop(x) for x in rows],"constraints":[{"type":c.type,"hardness":c.hardness,"weight":c.weight,"parameters":c.parameters} for c in cs]}
 
 @app.get("/v1/schedules/{sid}/timeline")
-def timeline(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def timeline(sid:str,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     return get_schedule_timeline(db,sid,user_id)
 
@@ -134,7 +161,7 @@ def agent(req:AgentRequest,db:Session=Depends(get_db),principal:str|None=Depends
     return {"status":"clarification_required","question":"Create a schedule first, then provide its schedule_id to add destinations or replan.","intent":intent}
 
 @app.get("/v1/proposals/{pid}")
-def read_proposal(pid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def read_proposal(pid:str,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     return proposal_json(get_proposal(db,pid,user_id))
 
@@ -151,14 +178,14 @@ def reject_route(pid:str,req:RejectRequest,db:Session=Depends(get_db),principal:
     return reject(db,p,req.reason)
 
 @app.get("/v1/schedules/{sid}/revisions")
-def revisions(sid:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def revisions(sid:str,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     s=get_schedule(db,sid,user_id)
     rows=db.scalars(select(models.PlanRevision).where(models.PlanRevision.schedule_id==sid).order_by(models.PlanRevision.revision_number.desc())).all()
     return [{"id":r.id,"revision_number":r.revision_number,"snapshot":r.snapshot,"reason":r.reason,"created_at":r.created_at.isoformat()} for r in rows]
 
 @app.get("/v1/preferences")
-def preferences(user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def preferences(user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     rows=db.scalars(select(models.Preference).where(models.Preference.user_id==user_id)).all()
     return [{"id":r.id,"key":r.key,"value":r.value,"confidence":r.confidence,"source":r.source,"updated_at":r.updated_at.isoformat()} for r in rows]
@@ -175,7 +202,7 @@ def set_preference(req:PreferenceIn,db:Session=Depends(get_db),principal:str|Non
     return {"id":row.id,"user_id":row.user_id,"key":row.key,"value":row.value,"confidence":row.confidence,"source":row.source}
 
 @app.put("/v1/preferences/{key}")
-def update_preference(key:str,req:PreferenceUpdate,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def update_preference(key:str,req:PreferenceUpdate,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     row=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key==key))
     if not row:
@@ -185,7 +212,7 @@ def update_preference(key:str,req:PreferenceUpdate,user_id:str,db:Session=Depend
     return {"id":row.id,"key":row.key,"value":row.value,"confidence":row.confidence,"source":row.source,"updated_at":row.updated_at.isoformat()}
 
 @app.delete("/v1/preferences/{key}",status_code=204)
-def delete_preference(key:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def delete_preference(key:str,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     row=db.scalar(select(models.Preference).where(models.Preference.user_id==user_id,models.Preference.key==key))
     if not row:
@@ -193,7 +220,7 @@ def delete_preference(key:str,user_id:str,db:Session=Depends(get_db),principal:s
     db.delete(row); db.commit()
 
 @app.get("/v1/routines")
-def routines(user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def routines(user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     rows=db.scalars(select(models.Routine).where(models.Routine.user_id==user_id).order_by(models.Routine.weekday,models.Routine.name)).all()
     return [{"id":r.id,"name":r.name,"weekday":r.weekday,"stop":r.stop,"active":r.active,"created_at":r.created_at.isoformat()} for r in rows]
@@ -217,7 +244,7 @@ def update_routine(routine_id:str,req:RoutineUpdate,db:Session=Depends(get_db),p
     return {"id":row.id,"name":row.name,"weekday":row.weekday,"stop":row.stop,"active":row.active}
 
 @app.delete("/v1/routines/{routine_id}",status_code=204)
-def delete_routine(routine_id:str,user_id:str,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+def delete_routine(routine_id:str,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     row=db.scalar(select(models.Routine).where(models.Routine.id==routine_id,models.Routine.user_id==user_id))
     if not row:
@@ -225,6 +252,6 @@ def delete_routine(routine_id:str,user_id:str,db:Session=Depends(get_db),princip
     db.delete(row); db.commit()
 
 @app.get("/v1/workflows/status")
-def workflow_status(execution_arn:str,user_id:str,principal:str|None=Depends(authenticated_user)):
+def workflow_status(execution_arn:str,user_id:str|None=None,principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
     return get_planning_execution(execution_arn,user_id)

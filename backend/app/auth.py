@@ -61,9 +61,11 @@ def authenticated_user(authorization: str | None = Header(default=None)) -> str 
         raise HTTPException(401, "Invalid bearer token", headers={"WWW-Authenticate": "Bearer"}) from exc
 
 
-def resolve_user_id(requested_user_id: str, authenticated_subject: str | None) -> str:
+def resolve_user_id(requested_user_id: str | None, authenticated_subject: str | None) -> str:
     if authenticated_subject is None:
+        if not requested_user_id:
+            raise HTTPException(422, "user_id is required when authentication is disabled")
         return requested_user_id
-    if requested_user_id != authenticated_subject:
+    if requested_user_id and requested_user_id != authenticated_subject:
         raise HTTPException(403, "Authenticated user does not own this resource")
     return authenticated_subject

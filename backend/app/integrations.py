@@ -1,8 +1,12 @@
 import boto3
+import json
+import logging
 from botocore.config import Config
 from app.config import settings
 from app.planner import MockTravelProvider, Leg
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 class AmazonLocation:
     def __init__(self):
@@ -47,6 +51,8 @@ def search_places(text,bias=None,max_results=10):
 
 def parse_intent(text, timezone="UTC"):
     if settings.mantle_enabled:
+        from app.strands_agent import ParsedIntent
+
         try:
             from openai import OpenAI
 
@@ -61,6 +67,10 @@ def parse_intent(text, timezone="UTC"):
                     "clarification_needed,clarification_question. Allowed operation: add_destination,"
                     "replan,create_schedule,clarify. Preserve the user's destination wording. Never invent "
                     "inventory, prices, opening hours, or travel facts. Ask for clarification when required. "
+                    "When the user explicitly says find, search for, look for, or locate a place or service, "
+                    "choose add_destination. A request such as 'Find a pharmacy near Chennai Central' is "
+                    "already clear; do not ask whether they want a list or directions. Clarify only when "
+                    "the place or requested action is genuinely missing or ambiguous. "
                     f"Timezone={timezone}. User request={text}")
             response=client.chat.completions.create(
                 model=settings.bedrock_model_id or "openai.gpt-oss-safeguard-20b",
@@ -68,16 +78,62 @@ def parse_intent(text, timezone="UTC"):
                 temperature=0,
                 response_format={"type":"json_object"},
             )
-            import json
-            from pydantic import ValidationError
-            from app.strands_agent import ParsedIntent
-            raw=response.choices[0].message.content or ""
-            parsed=ParsedIntent.model_validate_json(raw)
-            return parsed.model_dump()
-        except HTTPException:
-            raise
         except Exception as exc:
-            raise HTTPException(502,"Bedrock Mantle returned an invalid intent response") from exc
+            logger.error(
+                "Mantle intent request failed: type=%s module=%s status=%s request_id=%s",
+                type(exc).__name__,
+                getattr(exc, "name", None),
+                getattr(exc, "status_code", None),
+                getattr(exc, "request_id", None),
+            )
+            raise HTTPException(502, "Bedrock Mantle intent request failed") from exc
+
+        try:
+            choices = getattr(response, "choices", None) or []
+            if not choices:
+                raise ValueError("response contained no choices")
+            message = getattr(choices[0], "message", None)
+            raw = getattr(message, "content", None)
+            if not isinstance(raw, str) or not raw.strip():
+                refusal = bool(getattr(message, "refusal", None))
+                raise ValueError(f"response content was empty (refusal={refusal})")
+
+            # Some compatible endpoints wrap JSON in a markdown fence or short prose.
+            # Accept the first complete JSON object while still validating its schema.
+            candidate = raw.strip()
+            try:
+                parsed = ParsedIntent.model_validate_json(candidate)
+            except Exception:
+                start = candidate.find("{")
+                end = candidate.rfind("}")
+                if start < 0 or end <= start:
+                    raise
+                parsed = ParsedIntent.model_validate(json.loads(candidate[start : end + 1]))
+            if parsed.clarification_needed:
+                import re
+
+                search_match = re.match(
+                    r"^\s*(?:please\s+)?(?:find|search\s+for|look\s+for|locate)\s+(?:(?:a|an|the)\s+)?(.+?)\s*[?.!]*\s*$",
+                    text,
+                    re.IGNORECASE,
+                )
+                if search_match and len(search_match.group(1).split()) >= 2:
+                    parsed = ParsedIntent(
+                        operation="add_destination",
+                        destination_query=search_match.group(1),
+                        budget_inr=parsed.budget_inr,
+                        clarification_needed=False,
+                        clarification_question=None,
+                    )
+            return parsed.model_dump()
+        except Exception as exc:
+            logger.error(
+                "Mantle intent response invalid: type=%s finish_reason=%s request_id=%s",
+                type(exc).__name__,
+                getattr(choices[0], "finish_reason", None) if choices else None,
+                getattr(response, "_request_id", None),
+            )
+            raise HTTPException(502, "Bedrock Mantle returned an invalid intent response") from exc
     if settings.aws_integrations_enabled and settings.bedrock_model_id:
         raise HTTPException(503, "Configure OPENAI_API_KEY and OPENAI_BASE_URL for Bedrock Mantle inference")
     import re

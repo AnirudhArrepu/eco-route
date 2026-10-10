@@ -216,3 +216,32 @@ def test_parse_intent_uses_bedrock_mantle_openai_client(monkeypatch):
     assert captured["client"]["base_url"] == "https://mantle.example/v1"
     assert captured["client"]["project"] == "default"
     assert captured["request"]["model"] == "openai.gpt-oss-safeguard-20b"
+
+
+def test_explicit_place_search_does_not_require_clarification(monkeypatch):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from app import integrations
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            message = SimpleNamespace(content=(
+                '{"operation":"clarify","destination_query":"Chennai Central",'
+                '"budget_inr":null,"clarification_needed":true,'
+                '"clarification_question":"List or directions?"}'
+            ))
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    result = integrations.parse_intent("Find a pharmacy near Chennai Central", "Asia/Kolkata")
+
+    assert result["operation"] == "add_destination"
+    assert result["destination_query"] == "pharmacy near Chennai Central"
+    assert result["clarification_needed"] is False
