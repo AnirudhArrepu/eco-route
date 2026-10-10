@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, ArrowRight, Plus } from 'lucide-react'
 import { createSchedule, previewSchedule } from '../api/schedules'
@@ -8,6 +8,7 @@ import { locationFromPlace } from '../utils/formatters'
 import ScheduleForm from '../components/planning/ScheduleForm'
 import StopForm from '../components/planning/StopForm'
 import StopCard from '../components/planning/StopCard'
+import TaskExtractionPanel from '../components/planning/TaskExtractionPanel'
 import SchedulePreview from '../components/planning/SchedulePreview'
 import Button from '../components/ui/Button'
 import ErrorMessage from '../components/ui/ErrorMessage'
@@ -68,20 +69,21 @@ export default function PlannerPage() {
     change({ stops: editing ? draft.stops.map(item => item.id === editing.id ? stop : item) : [...draft.stops, stop] })
     setEditing(null); setShowStopForm(false)
   }
+  const addExtractedStop = stop => change({ stops: [...draft.stops, stop] })
   return <section className="page-planner">
     <div className="flex items-center justify-between gap-3"><Button variant="ghost" disabled={busy} onClick={() => step ? (setStep(step - 1), setError(null)) : setExitOpen(true)}><ArrowLeft size={16} />{step ? 'Back' : 'Home'}</Button><span className="text-xs text-neutral-500">STEP {step + 1} OF 4</span></div>
     <div className="step-progress" aria-label={`Step ${step + 1} of 4`}>{headings.map((_, i) => <span key={i} className={i <= step ? 'bg-neutral-900' : 'bg-neutral-200'} />)}</div>
     <h1 ref={headingRef} tabIndex={-1} className="page-title mt-9 outline-none">{headings[step]}</h1>
-    <p className="mt-3 text-sm leading-6 text-neutral-500">{step === 0 ? 'Let’s start with a little time for what matters.' : step === 1 ? 'A good day starts with a starting point.' : step === 2 ? 'Add one destination at a time. We’ll work out the order.' : 'Your plan stays unsaved until you confirm.'}</p>
-    {requestText && step < 3 && <aside className="notice mt-6"><p className="eyebrow mb-2">YOUR ORIGINAL REQUEST</p><p className="whitespace-pre-wrap text-sm">{requestText}</p><p className="mt-2 text-xs text-neutral-500">Use this as your checklist. Add each task below; automatic multi-task extraction is coming later.</p></aside>}
+    <p className="mt-3 text-sm leading-6 text-neutral-500">{step === 0 ? 'Let’s start with a little time for what matters.' : step === 1 ? 'A good day starts with a starting point.' : step === 2 ? 'Tell us your errands. We’ll find each stop, then work out the order.' : 'Your plan stays unsaved until you confirm.'}</p>
     <fieldset disabled={busy} className="mt-8 min-w-0">
       {step < 2 && <ScheduleForm step={step} draft={draft} onChange={change} />}
       {step === 2 && <div className="grid gap-4">
+        <TaskExtractionPanel text={requestText} onTextChange={setRequestText} date={draft.date} timezone={draft.timezone} bias={draft.startPlace} onAdd={addExtractedStop} />
         {draft.stops.map((stop, index) => <StopCard key={stop.id} stop={stop} index={index} onEdit={() => { setEditing(stop); setShowStopForm(true) }} onRemove={() => change({ stops: draft.stops.filter(item => item.id !== stop.id) })} />)}
         {showStopForm ? <div className="rounded-xl border border-neutral-200 p-4 sm:p-6"><h2 className="mb-5 font-semibold">{editing ? 'Adjust this stop' : 'One more thing to do'}</h2><StopForm key={editing?.id || 'new'} initial={editing} date={draft.date} timezone={draft.timezone} bias={draft.startPlace}
           onSubmit={storeStop} onCancel={() => { setEditing(null); setShowStopForm(false) }} /></div>
-          : <Button variant="secondary" className="w-full" onClick={() => { setEditing(null); setShowStopForm(true) }}><Plus size={17} />Add a destination</Button>}
-        {!draft.stops.length && !showStopForm && <p className="py-3 text-center text-sm text-neutral-500">Your stops will appear here.</p>}
+          : <Button variant="secondary" className="w-full" onClick={() => { setEditing(null); setShowStopForm(true) }}><Plus size={17} />Add a destination manually</Button>}
+        {!draft.stops.length && !showStopForm && <p className="py-3 text-center text-sm text-neutral-500">Choose a place for each extracted task or add destinations manually.</p>}
       </div>}
       {step === 3 && preview && <SchedulePreview preview={preview.response} body={preview.body} />}
     </fieldset>

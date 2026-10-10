@@ -116,11 +116,17 @@ def get_schedule_timeline(db,sid,user_id):
     rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==sid).order_by(models.Stop.order_index)).all()
     existing=[row_stop(row) for row in rows]
     request=make_plan_request(db,schedule,existing,[],[],False,0)
+    provider=TravelProvider()
     try:
-        result=plan(request,TravelProvider(),request["preferred_travel_mode"])
+        result=plan(request,provider,request["preferred_travel_mode"])
     except Exception as exc:
         raise HTTPException(502,"Travel provider failed to calculate the schedule timeline") from exc
     metrics_after=result["metrics"].get("after")
+    if metrics_after:
+        from app.planner import calculate_distance_savings
+        metrics_after["distance_savings"] = calculate_distance_savings(
+            existing, request, provider, request["preferred_travel_mode"], metrics_after["distance_km"]
+        )
     return {"schedule_id":schedule.id,"revision":schedule.current_revision,"feasible":result["feasible"],"timeline":(metrics_after or {}).get("timeline",[]),"metrics":metrics_after,"conflicts":result["conflicts"],"travel_estimate_source":"amazon_location" if settings.aws_integrations_enabled else "local_mock"}
 
 def user_travel_mode(db,user_id):

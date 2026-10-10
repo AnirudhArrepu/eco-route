@@ -239,6 +239,10 @@ def optimize_schedule(req, provider=None, mode="Walking"):
     """Find the lowest-cost feasible ordering within a bounded search budget."""
     provider = CachedTravelProvider(provider or MockTravelProvider())
     stops = req["existing_stops"]
+    # A separate journey for each errand from the same start to the same finish is
+    # the comparison baseline for the combined itinerary.
+    savings = calculate_distance_savings(stops, req, provider, mode, None)
+    separate_trip_km = savings["baseline_km"]
     budget = max(1, int(req.get("max_candidate_evaluations", 500)))
     # A schedule with many stops can still be planned safely: enumerate a bounded
     # subset of stable input-order permutations, and tell callers when search was capped.
@@ -274,4 +278,27 @@ def optimize_schedule(req, provider=None, mode="Walking"):
         return {"feasible": False, "stops": stops, "metrics": {"before": None, "after": None}, "conflicts": unique_conflicts, "explanation_facts": ["No ordering in the evaluated search budget satisfies all hard constraints."], "evaluated_orders": evaluated, "search_truncated": search_truncated}
 
     _, _, ordered, after = best
-    return {"feasible": True, "stops": ordered, "metrics": {"after": after, "score": round(best[0], 3)}, "conflicts": [], "explanation_facts": [f"Evaluated {evaluated} itinerary order(s).", f"Estimated travel: {after['travel_minutes']:.1f} minutes over {after['distance_km']:.1f} km.", "All configured hard constraints passed validation."], "evaluated_orders": evaluated, "search_truncated": search_truncated}
+    savings = calculate_distance_savings(ordered, req, provider, mode, after["distance_km"])
+    after["distance_savings"] = savings
+    return {"feasible": True, "stops": ordered, "metrics": {"before": {"distance_km": round(separate_trip_km, 2)}, "after": after, "distance_savings": savings, "score": round(best[0], 3)}, "conflicts": [], "explanation_facts": [f"Evaluated {evaluated} itinerary order(s).", f"Estimated travel: {after['travel_minutes']:.1f} minutes over {after['distance_km']:.1f} km.", "All configured hard constraints passed validation."], "evaluated_orders": evaluated, "search_truncated": search_truncated}
+
+
+def calculate_distance_savings(stops, req, provider, mode, planned_km):
+    separate_trip_km = 0.0
+    try:
+        for stop in stops:
+            separate_trip_km += provider.leg(req["start_location"], stop["location"], mode).distance_km
+            separate_trip_km += provider.leg(stop["location"], req["end_location"], mode).distance_km
+    except (KeyError, TypeError, ValueError):
+        separate_trip_km = 0.0
+    if planned_km is None:
+        return {"baseline_km": round(separate_trip_km, 2), "planned_km": None,
+                "saved_km": None, "saved_percent": None,
+                "baseline": "one separate start-to-finish journey per stop"}
+    difference = round(separate_trip_km - planned_km, 2)
+    return {"baseline_km": round(separate_trip_km, 2), "planned_km": round(planned_km, 2),
+            "saved_km": max(0, difference), "additional_km": max(0, -difference),
+            "saved_percent": round(max(0, difference) / separate_trip_km * 100, 1) if separate_trip_km else 0,
+            "separate_trips": len(stops), "combined_trips": 1 if stops else 0,
+            "trips_saved": max(0, len(stops) - 1),
+            "baseline": "one separate start-to-finish journey per stop"}

@@ -8,9 +8,9 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import Base, engine, get_db
 from app import models
-from app.schemas import ScheduleCreate, SchedulePreview, AddStopRequest, ReplanRequest, AgentRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate, SignUpRequest, ConfirmSignUpRequest, EmailRequest, LoginRequest, RefreshTokenRequest
+from app.schemas import ScheduleCreate, SchedulePreview, AddStopRequest, ReplanRequest, AgentRequest, TaskExtractionRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate, SignUpRequest, ConfirmSignUpRequest, EmailRequest, LoginRequest, RefreshTokenRequest
 from app.service import create_schedule, preview_schedule, get_schedule, get_schedule_timeline, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid
-from app.integrations import parse_intent, search_places, infer_replan_updates
+from app.integrations import parse_intent, search_places, infer_replan_updates, extract_tasks
 from app.auth import authenticated_user, resolve_user_id
 from app import cognito
 from app.strands_agent import interpret_with_strands
@@ -93,6 +93,10 @@ def create(req:ScheduleCreate,db:Session=Depends(get_db),principal:str|None=Depe
 def preview(req:SchedulePreview,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     return preview_schedule(db,req,req.max_candidate_evaluations)
+
+@app.post("/v1/agent/extract-tasks")
+def extract_plan_tasks(req:TaskExtractionRequest,principal:str|None=Depends(authenticated_user)):
+    return extract_tasks(req.text,req.date,req.timezone)
 
 @app.get("/v1/places/search")
 def place_search(query:str,latitude:float|None=None,longitude:float|None=None,principal:str|None=Depends(authenticated_user)):

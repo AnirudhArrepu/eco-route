@@ -4,9 +4,9 @@ import { searchPlaces } from '../../api/places'
 import ErrorMessage from '../ui/ErrorMessage'
 import LoadingState from '../ui/LoadingState'
 
-export default function PlaceSearch({ label, value, onChange, bias, placeholder = 'Search a place or address' }) {
+export default function PlaceSearch({ label, value, onChange, bias, initialQuery = '', placeholder = 'Search a place or address' }) {
   const id = useId()
-  const [query, setQuery] = useState(value?.title || value?.label || '')
+  const [query, setQuery] = useState(value?.title || value?.label || initialQuery)
   const [places, setPlaces] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -16,7 +16,7 @@ export default function PlaceSearch({ label, value, onChange, bias, placeholder 
   const [retry, setRetry] = useState(0)
   const latitude = bias?.latitude
   const longitude = bias?.longitude
-  useEffect(() => { if (value) setQuery(value.title || value.label || '') }, [value])
+  useEffect(() => { setQuery(value ? (value.title || value.label || '') : initialQuery) }, [value, initialQuery])
   useEffect(() => {
     const controller = new AbortController()
     setPlaces([]); setSearched(false); setError(null); setActive(-1); setBusy(false)

@@ -150,6 +150,101 @@ def parse_intent(text, timezone="UTC"):
         query=(text[:budget_match.start()] + text[budget_match.end():]).strip(" ,.;")
     return {"operation":"add_destination","destination_query":query,"budget_inr":int(budget_match.group(1).replace(",","")) if budget_match else None,"clarification_needed":False,"clarification_question":None,"verification_note":"Place search does not verify product stock or price."}
 
+def extract_tasks(text, plan_date, timezone="UTC"):
+    """Turn a new-plan request into distinct errands with explicit constraints only."""
+    from datetime import date
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    from pydantic import BaseModel, Field, ValidationError
+
+    class Task(BaseModel):
+        title: str = Field(min_length=1, max_length=128)
+        destination_query: str = Field(min_length=2, max_length=300)
+        duration_minutes: int | None = Field(default=None, ge=1, le=1440)
+        deadline: str | None = None
+        fixed_time: str | None = None
+
+    class TaskList(BaseModel):
+        tasks: list[Task] = Field(max_length=12)
+        clarification_question: str | None = None
+
+    try:
+        zone = ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(422, "Unknown timezone") from exc
+    date_value = plan_date if isinstance(plan_date, date) else date.fromisoformat(str(plan_date))
+    if settings.mantle_enabled:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=settings.openai_api_key.get_secret_value(), base_url=settings.openai_base_url,
+                            project=settings.openai_project_id or None, timeout=20, max_retries=1)
+            prompt = (
+                "Extract distinct real-world errands and appointments from the user's new-day planning request. "
+                "Return JSON only: {tasks:[{title,destination_query,duration_minutes,deadline,fixed_time}],clarification_question}. "
+                "Use one task per distinct place/action; split coordinated errands such as grocery store and pharmacy. "
+                "Preserve destination wording so it can be searched. Never invent a place, deadline, appointment, or duration. "
+                "duration_minutes is null unless explicitly stated. deadline and fixed_time are null unless explicitly stated; "
+                "otherwise return local ISO datetime with the supplied timezone offset. If the request has no actionable "
+                "destination tasks, return an empty tasks array and a concise clarification_question. "
+                f"Plan date={date_value.isoformat()}, timezone={timezone}, UTC offset on plan date={date_value and __import__('datetime').datetime.combine(date_value, __import__('datetime').time(12), zone).utcoffset()}. "
+                f"Request={text}"
+            )
+            response = client.chat.completions.create(
+                model=settings.bedrock_model_id or "openai.gpt-oss-safeguard-20b",
+                messages=[{"role":"user","content":prompt}], temperature=0,
+                response_format={"type":"json_object"},
+            )
+            raw = response.choices[0].message.content
+            data = json.loads(raw)
+            parsed = TaskList.model_validate(data)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error("Mantle task extraction failed: type=%s status=%s request_id=%s", type(exc).__name__, getattr(exc,"status_code",None), getattr(locals().get("response"),"_request_id",None))
+            raise HTTPException(502, "Bedrock Mantle task extraction failed") from exc
+    else:
+        # Local fallback supports straightforward coordinated lists; Mantle handles richer phrasing.
+        import re
+        cleaned = re.sub(r"^\s*(?:i need to|i want to|please|can you help me|help me)\s+", "", text, flags=re.I)
+        cleaned = re.sub(r"^(?:visit|go to|stop by|pick up from|pick up|buy from|buy|get to)\s+", "", cleaned, flags=re.I)
+        parts = re.split(r"\s*,\s*|\s+and\s+", cleaned, flags=re.I)
+        time_match = re.search(r"\b(?:before|by|no later than)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text, re.I)
+        duration_match = re.search(r"\b(?:for|about|around)\s+(\d{1,3})\s*(?:minutes?|mins?)\b", text, re.I)
+        deadline = None
+        if time_match:
+            hour = int(time_match.group(1)) % 12
+            if time_match.group(3).lower() == "pm":
+                hour += 12
+            deadline = __import__("datetime").datetime.combine(
+                date_value, __import__("datetime").time(hour, int(time_match.group(2) or 0), tzinfo=zone)
+            ).isoformat()
+        tasks = []
+        for part in parts:
+            query = re.sub(r"\b(?:before|by|no later than)\b.*$", "", part, flags=re.I).strip(" .?!")
+            query = re.sub(r"^(?:the|a|an)\s+", "", query, flags=re.I)
+            if query:
+                title = query[:1].upper() + query[1:]
+                tasks.append(Task(title=title, destination_query=query,
+                                  duration_minutes=int(duration_match.group(1)) if duration_match else None,
+                                  deadline=deadline))
+        parsed = TaskList(tasks=tasks[:12], clarification_question=None if tasks else "What places or errands should I include?")
+
+    output = []
+    for task in parsed.tasks:
+        def local_iso(value):
+            if not value:
+                return None
+            try:
+                parsed_time = __import__("datetime").datetime.fromisoformat(value)
+                if parsed_time.tzinfo is None:
+                    parsed_time = parsed_time.replace(tzinfo=zone)
+                return parsed_time.isoformat()
+            except (TypeError, ValueError):
+                return None
+        output.append({"title":task.title.strip(), "destination_query":task.destination_query.strip(),
+                       "duration_minutes":task.duration_minutes, "latest_end":local_iso(task.deadline),
+                       "fixed_start":local_iso(task.fixed_time)})
+    return {"tasks":output, "clarification_question":parsed.clarification_question}
+
 def infer_replan_updates(text, stops):
     """Extract only explicit duration extensions that can be tied to one stop."""
     import re

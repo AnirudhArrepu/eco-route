@@ -75,6 +75,11 @@ class AgentRequest(BaseModel):
     schedule_id: str | None = None
     timezone: str = "UTC"
 
+class TaskExtractionRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    date: date
+    timezone: str = "UTC"
+
 class PreferenceUpdate(BaseModel):
     value: dict[str, Any]
     confidence: float = Field(default=1.0, ge=0, le=1)

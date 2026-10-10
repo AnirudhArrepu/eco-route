@@ -48,6 +48,7 @@ application data endpoints. The auth endpoints and readiness checks are public.
 | `GET` | `/v1/schedules/{schedule_id}/revisions` | Optional `user_id` query parameter | Bearer token |
 | `GET` | `/v1/places/search` | Required `query`; optional paired `latitude` and `longitude` query parameters | Bearer token |
 | `POST` | `/v1/agent/requests` | Agent request JSON | Bearer token |
+| `POST` | `/v1/agent/extract-tasks` | New-plan text, date, and timezone JSON | Bearer token |
 | `GET` | `/v1/workflows/status` | Required `execution_arn`; optional `user_id` query parameter | Bearer token |
 | `POST` | `/v1/schedules/{schedule_id}/stops` | Destination and planning options JSON | Bearer token |
 | `POST` | `/v1/schedules/{schedule_id}/replan` | Stop updates and planning options JSON | Bearer token |
@@ -157,6 +158,53 @@ The body is the schedule body below, with optional `max_candidate_evaluations` (
 does not save the schedule. It returns `feasible`, the ordered `stops`, `timeline`, `metrics`,
 `conflicts`, `explanation_facts`, `evaluated_orders`, `search_truncated`, and
 `travel_estimate_source`. An infeasible preview is returned with `feasible: false` and its conflicts.
+When stops are present, `metrics.distance_savings` reports estimated km saved by combining errands.
+Its baseline is one separate start-to-finish journey per stop, compared with one combined itinerary.
+This is a route-distance comparison; it does not calculate fuel use or carbon emissions.
+
+### Extract errands from a new-plan request
+
+Before previewing a new plan, the frontend can ask the task extractor to split the request into
+distinct errands and explicit time constraints. The user must select an exact place for each task
+from `/v1/places/search` before it is included in the schedule.
+
+`POST /v1/agent/extract-tasks`
+
+```json
+{
+  "text": "I need to visit the grocery store and pharmacy before 5 pm",
+  "date": "2026-10-11",
+  "timezone": "Asia/Kolkata"
+}
+```
+
+Response:
+
+```json
+{
+  "tasks": [
+    {
+      "title": "Grocery store",
+      "destination_query": "grocery store",
+      "duration_minutes": null,
+      "latest_end": "2026-10-11T17:00:00+05:30",
+      "fixed_start": null
+    },
+    {
+      "title": "Pharmacy",
+      "destination_query": "pharmacy",
+      "duration_minutes": null,
+      "latest_end": "2026-10-11T17:00:00+05:30",
+      "fixed_start": null
+    }
+  ],
+  "clarification_question": null
+}
+```
+
+Only explicit durations and times should be treated as extracted facts. If duration is omitted, the
+frontend may offer a clearly marked editable estimate. Include each selected destination in the
+schedule `stops` array, then use the existing preview and create sequence.
 
 ### Create a plan
 
@@ -461,7 +509,8 @@ when `include_routines` is true.
 2. Call `/v1/auth/me` to display the signed-in account. The returned `user_id` is informational;
    authenticated schedule calls can omit it.
 3. Use `/v1/places/search` for start/end and manually entered stop autocomplete.
-4. Build a schedule body, call `/v1/schedules/preview`, display the candidate timeline and conflicts,
+4. For a natural-language new plan, call `/v1/agent/extract-tasks`, let the user pick exact locations,
+   then build the schedule body. Call `/v1/schedules/preview`, display the candidate timeline and conflicts,
    then call `/v1/schedules` to save it.
 5. Submit a natural-language request to `/v1/agent/requests`, poll `/v1/workflows/status`, and let
    the user select a returned candidate.
