@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ArrowRight, History, Plus, RefreshCw, Sparkles } from 'lucide-react'
 import { getSchedule, getTimeline, replanSchedule } from '../api/schedules'
@@ -12,7 +12,6 @@ import Input from '../components/ui/Input'
 import BottomSheet from '../components/ui/BottomSheet'
 import ErrorMessage from '../components/ui/ErrorMessage'
 import LoadingState from '../components/ui/LoadingState'
-import MapPlaceholder from '../components/maps/MapPlaceholder'
 import ItinerarySheet from '../components/itinerary/ItinerarySheet'
 import Timeline from '../components/itinerary/Timeline'
 import ScheduleMetrics from '../components/itinerary/ScheduleMetrics'
@@ -21,6 +20,8 @@ import RevisionHistory from '../components/itinerary/RevisionHistory'
 import StopForm from '../components/planning/StopForm'
 import { PlanConflicts } from '../components/planning/SchedulePreview'
 import ChatPanel from '../components/chat/ChatPanel'
+
+const RouteMap = lazy(() => import('../components/maps/RouteMap'))
 
 export default function ItineraryPage() {
   const { activeId, setActiveId } = usePlan()
@@ -106,7 +107,9 @@ export default function ItineraryPage() {
     <ErrorMessage error={error} />
     {pendingId && <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-neutral-200 p-4"><p className="text-sm text-neutral-500">A recent proposal is available to review.</p><Button variant="secondary" disabled={busy} onClick={reopenProposal}>Review changes</Button></div>}
     <div className="itinerary-grid">
-      <MapPlaceholder />
+      <Suspense fallback={<section className="map-placeholder" aria-label="Loading itinerary map"><div className="map-empty text-sm text-neutral-500">Loading map…</div></section>}>
+        <RouteMap schedule={schedule} />
+      </Suspense>
       <ItinerarySheet stops={schedule.stops} summary={`Revision ${schedule.current_revision} · ${data.feasible ? 'Feasible plan' : 'Needs attention'}`}>
         {level => {
           const upcoming = data.timeline?.filter(item => Date.parse(item.end_at) >= Date.now()).map(item => item.stop_id) || []

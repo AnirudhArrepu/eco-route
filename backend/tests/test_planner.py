@@ -114,6 +114,13 @@ def test_distance_savings_estimates_co2_using_selected_travel_mode():
     assert car["estimated_co2_saved_kg"] == round(car["saved_km"] * 0.140, 3)
     assert car["co2_factor_source_url"].startswith("https://")
     assert walking["estimated_co2_saved_kg"] == 0
+    scenario = walking["public_transport_scenario"]
+    assert scenario["distance_km"] == 10
+    assert scenario["estimated_car_co2_kg"] == 1.4
+    assert scenario["estimated_public_transport_co2e_kg"] == 0.6
+    assert scenario["estimated_co2e_saved_kg"] == 0.8
+    assert "not a public-transport route" in scenario["warning"]
+    assert calculate_distance_savings([stop_item], request, provider, "Walking", None)["public_transport_scenario"] is None
 
 
 def test_schedule_optimizer_improves_orders_with_more_than_eight_stops():

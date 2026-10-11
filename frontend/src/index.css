@@ -124,8 +124,13 @@ summary::marker { color: #737373; }
 .map-placeholder { @apply relative flex min-w-0 flex-col justify-between overflow-hidden rounded-xl border border-neutral-200 bg-neutral-50 p-5; min-height: clamp(15rem, 36dvh, 25rem); }
 .map-label { @apply flex items-center gap-2 text-[9px] tracking-[0.12em] text-neutral-500; }
 .map-empty { @apply flex flex-1 flex-col items-center justify-center py-8 text-center; }
-.map-icon { @apply flex h-16 w-16 items-center justify-center rounded-2xl border border-neutral-200 bg-white text-neutral-500; }
 .map-footer { @apply flex items-center justify-between gap-3 text-[10px] text-neutral-400; }
+.route-map { @apply z-0 mt-4 w-full flex-1 overflow-hidden rounded-lg; min-height: 15rem; }
+.route-marker-container { border: 0; background: transparent; }
+.route-marker { display: flex; width: 30px; height: 30px; align-items: center; justify-content: center; border: 2px solid white; border-radius: 9999px; background: #111827; color: white; font-size: 11px; font-weight: 700; box-shadow: 0 1px 5px #0006; }
+.route-marker-endpoint { background: #047857; }
+.route-marker-finish { background: #b91c1c; }
+.route-marker-cluster { width: 34px; height: 34px; background: #1d4ed8; }
 .itinerary-sheet { @apply relative z-10 mt-4 min-w-0 rounded-xl border border-neutral-200 bg-white; }
 .sheet-handle { @apply mx-auto mt-3 h-1 w-8 rounded-full bg-neutral-200; }
 .sheet-heading { @apply flex items-start justify-between gap-2 p-4 sm:p-5; }

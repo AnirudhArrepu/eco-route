@@ -160,7 +160,10 @@ does not save the schedule. It returns `feasible`, the ordered `stops`, `timelin
 `travel_estimate_source`. An infeasible preview is returned with `feasible: false` and its conflicts.
 When stops are present, `metrics.distance_savings` reports estimated km saved by combining errands.
 Its baseline is one separate start-to-finish journey per stop, compared with one combined itinerary.
-This is a route-distance comparison; it does not calculate fuel use or carbon emissions.
+This is a route-distance comparison. It also includes `public_transport_scenario`, a same-distance
+CO₂/CO₂e comparison of a solo gasoline-car trip and an illustrative public-transport passenger-km
+factor. This is not a transit route or timetable. The estimate includes the car factor source and a
+warning that transit mode, occupancy, and electricity mix can change actual emissions.
 
 ### Extract errands from a new-plan request
 

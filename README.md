@@ -1,6 +1,6 @@
 ﻿# EcoRoute
 
-**Plan a day of errands as one practical trip. See the distance and estimated tailpipe CO₂ that the combined route may save.**
+**Plan a day of errands as one practical trip. Compare its estimated impact with a solo car trip or a public-transport scenario.**
 
 EcoRoute is a route-aware day planner for people who need to make several stops around a city. Enter errands in plain language, choose real places near your route, add time windows, and let the planner find a feasible stop order. When plans change, ask EcoRoute to adjust the existing itinerary; review the proposed change before approving it.
 
@@ -8,7 +8,7 @@ EcoRoute is a route-aware day planner for people who need to make several stops 
 
 A person with several errands may make a separate out-and-back trip for each one, even when those stops could fit into one journey. Those extra kilometres mean extra fuel use and tailpipe emissions for people travelling by car.
 
-EcoRoute helps people make that choice visible. It compares one multi-stop journey with a simple separate-trip baseline and shows estimated kilometres and direct tailpipe CO₂ saved. It is designed for everyday urban trips where errands, locations, and deadlines all matter.
+EcoRoute helps people make that choice visible. It compares one multi-stop journey with a simple separate-trip baseline and shows estimated kilometres and direct tailpipe CO₂ saved. It also estimates how emissions might differ if the same distance were travelled by public transport instead of a solo car. It is designed for everyday urban trips where errands, locations, and deadlines all matter.
 
 ## What EcoRoute does
 
@@ -31,8 +31,9 @@ EcoRoute fits the **Waste and Energy** track of [Environmental Hacks](https://ww
 - **Estimated kilometres saved** is the positive difference between the baseline and combined route. If the combined route is longer, EcoRoute reports additional distance instead of claiming savings.
 - In **Car** mode, the CO₂ scenario multiplies the distance difference by **0.140 kg CO₂ per vehicle-kilometre**. This factor represents a gasoline hatchback under 1,400 cc with an 8% uplift from the [WRI India-specific road transport emission factors study](https://shaktifoundation.in/wp-content/uploads/2022/04/WRI-2015-India-Specific-Road-Transport-Emission-Factors.pdf).
 - Walking and Bicycle modes assume zero direct tailpipe CO₂.
+- The itinerary also shows a public-transport scenario for the combined route distance, using an illustrative assumption of **0.060 kg CO₂e per passenger-kilometre**. It compares this with the gasoline-car factor above; the public-transport value is not route-, operator-, or vehicle-specific.
 
-This is a planning estimate, not a measurement of actual fuel use or a lifecycle emissions calculation. It does not account for the user's exact vehicle, occupancy, traffic, fuel mix, or emissions from vehicle and infrastructure manufacture. Route distance is a proxy for fuel use. The UI displays the baseline and factor source so users can interpret the estimate.
+These are planning estimates, not measurements of actual fuel use or lifecycle emissions. The public-transport scenario assumes the same distance as the current itinerary; it does not provide transit directions or timetables. Actual transit routes, mode, occupancy, and electricity mix can change emissions. It does not account for emissions from vehicle and infrastructure manufacture. Route distance is a proxy for fuel use. The UI displays the baseline, factor assumptions, and warning so users can interpret the estimate.
 
 ## How it is built
 
@@ -85,7 +86,7 @@ When Mantle cannot be reached or returns an unusable response, the backend has l
 - Place suggestions identify locations; they do not verify inventory, prices, or opening hours.
 - Route and emissions estimates depend on the configured travel provider and travel mode. Local mock routing is for development, not a live travel recommendation.
 - CO₂ is a scenario estimate for direct tailpipe emissions in Car mode, not an audited carbon accounting result.
-- Public-transit routing, vehicle-specific fuel economy, live traffic-aware emissions, shared-trip matching, and measured real-world impact are not currently modeled.
+- Public-transit directions/timetables, vehicle-specific fuel economy, live traffic-aware emissions, shared-trip matching, and measured real-world impact are not currently modeled. Public transport is shown only as a clearly labeled emissions scenario.
 - If a place or constraint cannot be resolved safely, EcoRoute asks the user to clarify or select a candidate.
 
 ## Running checks
@@ -140,6 +141,5 @@ Open the local URL printed by Vite. The web app signs users in through the backe
 - Update frontend code, then run **npm run build** from **frontend** to check the production bundle.
 - Keep local secrets in **backend/.env**; do not add them to commits.
 - For AWS deployment and configuration, see [backend/README.md](backend/README.md).
-
 
 

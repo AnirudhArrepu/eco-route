@@ -10,6 +10,12 @@ from typing import Any, Protocol
 CAR_CO2_KG_PER_KM = 0.140
 CAR_CO2_FACTOR_SOURCE = "WRI India-specific road transport factors (2015), gasoline hatchback under 1,400 cc with 8% uplift"
 CAR_CO2_FACTOR_SOURCE_URL = "https://shaktifoundation.in/wp-content/uploads/2022/04/WRI-2015-India-Specific-Road-Transport-Emission-Factors.pdf"
+PUBLIC_TRANSPORT_CO2E_KG_PER_PASSENGER_KM = 0.060
+PUBLIC_TRANSPORT_FACTOR_SOURCE = "Illustrative planning assumption; not a route-, operator-, or vehicle-specific measurement"
+PUBLIC_TRANSPORT_ESTIMATE_WARNING = (
+    "This is a same-distance scenario, not a public-transport route or timetable. "
+    "Actual emissions vary by transit mode, occupancy, and electricity mix."
+)
 
 
 @dataclass(frozen=True)
@@ -364,6 +370,7 @@ def calculate_distance_savings(stops, req, provider, mode, planned_km):
                 "co2_factor_kg_per_km": CAR_CO2_KG_PER_KM if mode == "Car" else 0.0,
                 "co2_factor_source": CAR_CO2_FACTOR_SOURCE if mode == "Car" else "Zero direct tailpipe CO2 assumed for walking and bicycle modes",
                 "co2_factor_source_url": CAR_CO2_FACTOR_SOURCE_URL if mode == "Car" else None,
+                "public_transport_scenario": None,
                 "baseline": "one separate start-to-finish journey per stop"}
     difference = round(separate_trip_km - planned_km, 2)
     co2_factor = CAR_CO2_KG_PER_KM if mode == "Car" else 0.0
@@ -375,6 +382,26 @@ def calculate_distance_savings(stops, req, provider, mode, planned_km):
             "co2_factor_kg_per_km": co2_factor,
             "co2_factor_source": CAR_CO2_FACTOR_SOURCE if mode == "Car" else "Zero direct tailpipe CO2 assumed for walking and bicycle modes",
             "co2_factor_source_url": CAR_CO2_FACTOR_SOURCE_URL if mode == "Car" else None,
+            "public_transport_scenario": calculate_public_transport_scenario(planned_km),
             "separate_trips": len(stops), "combined_trips": 1 if stops else 0,
             "trips_saved": max(0, len(stops) - 1),
             "baseline": "one separate start-to-finish journey per stop"}
+
+
+def calculate_public_transport_scenario(distance_km):
+    if distance_km is None:
+        return None
+    car_emissions = distance_km * CAR_CO2_KG_PER_KM
+    transit_emissions = distance_km * PUBLIC_TRANSPORT_CO2E_KG_PER_PASSENGER_KM
+    return {
+        "distance_km": round(distance_km, 2),
+        "estimated_car_co2_kg": round(car_emissions, 3),
+        "estimated_public_transport_co2e_kg": round(transit_emissions, 3),
+        "estimated_co2e_saved_kg": round(car_emissions - transit_emissions, 3),
+        "car_factor_kg_per_km": CAR_CO2_KG_PER_KM,
+        "public_transport_factor_kg_per_passenger_km": PUBLIC_TRANSPORT_CO2E_KG_PER_PASSENGER_KM,
+        "car_factor_source": CAR_CO2_FACTOR_SOURCE,
+        "car_factor_source_url": CAR_CO2_FACTOR_SOURCE_URL,
+        "public_transport_factor_source": PUBLIC_TRANSPORT_FACTOR_SOURCE,
+        "warning": PUBLIC_TRANSPORT_ESTIMATE_WARNING,
+    }
