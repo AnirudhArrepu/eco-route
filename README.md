@@ -54,43 +54,6 @@ problem and the potential trade-off understandable and actionable.
 6. **See the impact.** Compare the combined route with separate out-and-back
    trips and view a clearly qualified public-transport scenario.
 
-### User request to approved itinerary
-
-```mermaid
-flowchart TD
-    U["User describes errands, appointments, and deadlines"] --> UI["React planner"]
-    UI --> AUTH["Sign in with Amazon Cognito"]
-    AUTH --> API["Amazon API Gateway"]
-    API --> TASK["FastAPI Lambda: task extraction request"]
-    TASK --> AGENT["Strands Agent"]
-    AGENT --> MANTLE["Amazon Bedrock Mantle<br/>structured natural-language interpretation"]
-    MANTLE --> TASKS["Distinct tasks and explicit time constraints"]
-    TASKS --> SEARCH["Amazon Location place search"]
-    SEARCH --> RANK["Rank real candidates by routed detour"]
-    RANK --> PICK["User reviews/selects a place for each task"]
-    PICK --> PREVIEW["Request schedule preview"]
-    PREVIEW --> ROUTE["Amazon Location route estimates"]
-    ROUTE --> PLAN["Deterministic planner<br/>order, timeline, feasibility, conflicts"]
-    PLAN --> REVIEW["Review plan and estimates"]
-    REVIEW --> SAVE["Save schedule in Amazon RDS"]
-    SAVE --> ITIN["Itinerary, timeline, and map"]
-    ITIN --> EDIT{"Plan change?"}
-    EDIT -->|"No"| DONE["User follows the reviewed plan"]
-    EDIT -->|"Yes: natural-language request"| CHAT["Ask EcoRoute"]
-    CHAT --> SFN["AWS Step Functions"]
-    SFN --> WORKER["Workflow Lambda"]
-    WORKER --> INTERPRET["Strands + Mantle<br/>interpret against current stops"]
-    INTERPRET --> BRANCH{"Intent"}
-    BRANCH -->|"New destination"| SEARCH
-    BRANCH -->|"Change existing plan"| REPLAN["Deterministic replan and validation"]
-    REPLAN --> PROPOSAL["Persist proposal; saved schedule unchanged"]
-    PROPOSAL --> DECIDE{"User decision"}
-    DECIDE -->|"Reject"| ITIN
-    DECIDE -->|"Approve"| COMMIT["Revalidate ownership, expiry,<br/>revision, and feasibility; commit"]
-    COMMIT --> REV["Record next schedule revision in RDS"]
-    REV --> ITIN
-```
-
 ### Request and change sequence
 
 ```mermaid
@@ -195,6 +158,43 @@ flowchart LR
     WorkflowLambda --> Location
     ApiLambda --> RDS
     WorkflowLambda --> RDS
+```
+
+### User request to approved itinerary
+
+```mermaid
+flowchart TD
+    U["User describes errands, appointments, and deadlines"] --> UI["React planner"]
+    UI --> AUTH["Sign in with Amazon Cognito"]
+    AUTH --> API["Amazon API Gateway"]
+    API --> TASK["FastAPI Lambda: task extraction request"]
+    TASK --> AGENT["Strands Agent"]
+    AGENT --> MANTLE["Amazon Bedrock Mantle<br/>structured natural-language interpretation"]
+    MANTLE --> TASKS["Distinct tasks and explicit time constraints"]
+    TASKS --> SEARCH["Amazon Location place search"]
+    SEARCH --> RANK["Rank real candidates by routed detour"]
+    RANK --> PICK["User reviews/selects a place for each task"]
+    PICK --> PREVIEW["Request schedule preview"]
+    PREVIEW --> ROUTE["Amazon Location route estimates"]
+    ROUTE --> PLAN["Deterministic planner<br/>order, timeline, feasibility, conflicts"]
+    PLAN --> REVIEW["Review plan and estimates"]
+    REVIEW --> SAVE["Save schedule in Amazon RDS"]
+    SAVE --> ITIN["Itinerary, timeline, and map"]
+    ITIN --> EDIT{"Plan change?"}
+    EDIT -->|"No"| DONE["User follows the reviewed plan"]
+    EDIT -->|"Yes: natural-language request"| CHAT["Ask EcoRoute"]
+    CHAT --> SFN["AWS Step Functions"]
+    SFN --> WORKER["Workflow Lambda"]
+    WORKER --> INTERPRET["Strands + Mantle<br/>interpret against current stops"]
+    INTERPRET --> BRANCH{"Intent"}
+    BRANCH -->|"New destination"| SEARCH
+    BRANCH -->|"Change existing plan"| REPLAN["Deterministic replan and validation"]
+    REPLAN --> PROPOSAL["Persist proposal; saved schedule unchanged"]
+    PROPOSAL --> DECIDE{"User decision"}
+    DECIDE -->|"Reject"| ITIN
+    DECIDE -->|"Approve"| COMMIT["Revalidate ownership, expiry,<br/>revision, and feasibility; commit"]
+    COMMIT --> REV["Record next schedule revision in RDS"]
+    REV --> ITIN
 ```
 
 ### Why the AWS pieces are used
