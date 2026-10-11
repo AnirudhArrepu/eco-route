@@ -8,3 +8,4 @@ psycopg[binary]>=3.2,<4
 pydantic>=2.8,<3
 pydantic-settings>=2.4,<3
 sqlalchemy>=2,<3
+strands-agents==1.59.0

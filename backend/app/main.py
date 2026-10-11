@@ -150,6 +150,8 @@ def agent(req:AgentRequest,db:Session=Depends(get_db),principal:str|None=Depends
     req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     if settings.step_functions_enabled:
         return start_planning_execution(user_id=req.user_id,text=req.text,schedule_id=req.schedule_id,timezone=req.timezone)
+    if not req.schedule_id:
+        raise HTTPException(422,"schedule_id is required to interpret a request against an itinerary")
     schedule_context=None
     bias=None
     if req.schedule_id:
@@ -173,10 +175,14 @@ def agent(req:AgentRequest,db:Session=Depends(get_db),principal:str|None=Depends
         if not req.schedule_id: raise HTTPException(422,"schedule_id is required")
         s=get_schedule(db,req.schedule_id,req.user_id)
         query=intent.get("destination_query") or req.text
-        places=search_places(query,[s.start_location["longitude"],s.start_location["latitude"]],10)
-        message="Choose a place, verify any product details, then submit it to the stops endpoint."
-        if intent.get("intent_source")=="local_fallback":
-            message="The language model was unavailable; this request was interpreted with simple rules. Review the place suggestions carefully. " + message
+        places=search_places_on_route(
+            query,
+            s.start_location,
+            s.end_location,
+            user_travel_mode(db, req.user_id),
+            5,
+        )
+        message="Place suggestions are ranked by route detour. Review and verify the destination, then submit it to the stops endpoint."
         return {"status":"destination_candidates" if places else "needs_destination_selection","intent":intent,"candidates":places,"message":message}
     if op=="replan":
         if not req.schedule_id: raise HTTPException(422,"schedule_id is required")

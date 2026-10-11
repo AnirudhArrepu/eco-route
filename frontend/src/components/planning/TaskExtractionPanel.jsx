@@ -14,10 +14,11 @@ export default function TaskExtractionPanel({ text, onTextChange, date, timezone
   const [added, setAdded] = useState({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [routeSearchWarning, setRouteSearchWarning] = useState(false)
   const [question, setQuestion] = useState('')
   const [extraction, setExtraction] = useState(null)
   const extract = async event => {
-    event.preventDefault(); setBusy(true); setError(null); setQuestion(''); setTasks([]); setSelected({}); setRouteOptions({}); setAdded({}); setExtraction(null)
+    event.preventDefault(); setBusy(true); setError(null); setRouteSearchWarning(false); setQuestion(''); setTasks([]); setSelected({}); setRouteOptions({}); setAdded({}); setExtraction(null)
     try {
       const result = await extractPlanTasks({ text, date, timezone })
       const extracted = result.tasks || []
@@ -26,12 +27,11 @@ export default function TaskExtractionPanel({ text, onTextChange, date, timezone
       if (startPlace && endPlace && extracted.length) {
         const start = locationFromPlace(startPlace)
         const end = locationFromPlace(endPlace)
-        const ranked = await Promise.all(extracted.map(async task => {
-          try {
-            const response = await searchPlacesOnRoute({ query: task.destination_query, start_location: start, end_location: end })
-            return response.places || []
-          } catch { return [] }
-        }))
+        const results = await Promise.allSettled(extracted.map(task =>
+          searchPlacesOnRoute({ query: task.destination_query, start_location: start, end_location: end }),
+        ))
+        const ranked = results.map(result => result.status === 'fulfilled' ? result.value.places || [] : [])
+        setRouteSearchWarning(results.some(result => result.status === 'rejected'))
         const options = Object.fromEntries(ranked.map((places, index) => [index, places]))
         setRouteOptions(options)
         setSelected(Object.fromEntries(ranked.flatMap((places, index) => places.length ? [[index, places[0]]] : [])))
@@ -42,10 +42,10 @@ export default function TaskExtractionPanel({ text, onTextChange, date, timezone
   const addTask = (task, index) => {
     const place = selected[index]
     if (!place) return
-    onAdd({ id: uniqueId(), title: task.title, type: task.fixed_start ? 'appointment' : 'errand',
+    onAdd({ id: uniqueId(), title: task.title, type: task.type || (task.fixed_start ? 'appointment' : 'errand'),
       location: locationFromPlace(place), duration_minutes: task.duration_minutes || 30,
       priority: 3, mandatory: true, latest_end: task.latest_end || null, fixed_start: task.fixed_start || null,
-      earliest_start: null, latest_start: null, source: 'user' })
+      earliest_start: null, latest_start: task.latest_start || null, source: 'user' })
     setAdded(value => ({ ...value, [index]: true }))
   }
   return <section className="notice grid gap-4" aria-label="Extract stops from request">
@@ -55,16 +55,11 @@ export default function TaskExtractionPanel({ text, onTextChange, date, timezone
       <Button type="submit" variant="secondary" busy={busy} disabled={!text.trim()}><Sparkles size={16} />Find my stops</Button>
     </form>
     <ErrorMessage error={error} />
-    {extraction && <p role="status" className="text-xs leading-5 text-neutral-500">{extraction.source === 'mantle'
-      ? 'Tasks parsed by Bedrock Mantle. Review the suggested stops and timing.'
-      : extraction.reason === 'mantle_response_invalid'
-        ? 'Mantle returned an unreadable response, so a simple local parser was used. Review the tasks and timing before adding them.'
-        : extraction.reason === 'mantle_request_failed'
-          ? 'Bedrock Mantle did not respond, so a simple local parser was used. Review the tasks and timing before adding them.'
-          : 'Bedrock Mantle is not configured for this environment, so a simple local parser was used.'}</p>}
+    {extraction && <p role="status" className="text-xs leading-5 text-neutral-500">Tasks interpreted by the Strands agent using Bedrock Mantle. Review the suggested stops and timing.</p>}
+    {routeSearchWarning && <p role="status" className="text-xs leading-5 text-amber-700">Some route-ranked place searches were unavailable. You can still choose an exact place below.</p>}
     {question && <p role="status" className="text-sm text-neutral-600">{question}</p>}
     {tasks.map((task, index) => <article key={`${index}-${task.destination_query}`} className="grid gap-3 border-t border-neutral-200 pt-4 sm:grid-cols-[1fr_auto] sm:items-end">
-      <div className="grid gap-2"><div><h3 className="font-medium">{task.title}</h3><p className="text-xs text-neutral-500">Search: {task.destination_query}{task.duration_minutes ? ` · ${task.duration_minutes} min` : ' · 30 min suggested'}{task.latest_end ? ` · finish by ${new Date(task.latest_end).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: timezone })}` : ''}{task.fixed_start ? ` · appointment ${new Date(task.fixed_start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: timezone })}` : ''}</p></div>
+      <div className="grid gap-2"><div><h3 className="font-medium">{task.title}</h3><p className="text-xs text-neutral-500">Search: {task.destination_query}{task.duration_minutes ? ` · ${task.duration_minutes} min` : ' · 30 min suggested'}{task.latest_start ? ` · arrive by ${new Date(task.latest_start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: timezone })}` : ''}{task.latest_end ? ` · finish by ${new Date(task.latest_end).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: timezone })}` : ''}{task.fixed_start ? ` · appointment ${new Date(task.fixed_start).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: timezone })}` : ''}</p></div>
         {routeOptions[index]?.length > 0 && <label className="field"><span>Best route fit{selected[index]?.detour_km !== undefined ? ` · +${selected[index].detour_km.toFixed(1)} km detour` : ''}</span><select value={selected[index]?.id || selected[index]?.label || ''} onChange={event => setSelected(value => ({ ...value, [index]: routeOptions[index].find(place => (place.id || place.label) === event.target.value) }))}>{routeOptions[index].map(place => <option key={place.id || place.label} value={place.id || place.label}>{place.route_rank === 1 ? 'Least detour · ' : ''}{place.title || place.label} · +{place.detour_km.toFixed(1)} km</option>)}</select></label>}
         <PlaceSearch label={`Exact place for ${task.title}`} value={selected[index]} onChange={place => setSelected(value => ({ ...value, [index]: place }))} bias={startPlace} initialQuery={task.destination_query} placeholder={task.destination_query} />
       </div>

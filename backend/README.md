@@ -24,10 +24,11 @@ Set `DATABASE_URL` to RDS PostgreSQL and configure `AWS_REGION`, `AWS_INTEGRATIO
 role; don't put AWS access keys in source code. Enable Bedrock model access and provision an Amazon
 Location place index and route calculator in the configured region.
 For the OpenAI-compatible Bedrock Mantle API, set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and
-`OPENAI_PROJECT_ID`; `BEDROCK_MODEL_ID=openai.gpt-oss-safeguard-20b` selects the model. The Mantle
-variables take precedence over the AWS SDK Converse provider in `parse_intent`. Keep the API key
-only in the runtime's secret environment. For an AWS deployment, configure the same variables on
-the API and workflow Lambda; setting them in a local PowerShell session does not update Lambda.
+`OPENAI_PROJECT_ID`; `BEDROCK_MODEL_ID=openai.gpt-oss-safeguard-20b` selects the model. The pinned
+Strands Agents SDK uses `OpenAIModel` with this Mantle endpoint and structured outputs for
+natural-language task extraction, intent classification, and replan interpretation. Keep the API
+key only in the runtime's secret environment. For an AWS deployment, configure the same variables
+on the API and workflow Lambda; setting them in a local PowerShell session does not update Lambda.
 When AWS integrations are enabled, route and place provider failures are returned as errors;
 the backend does not silently substitute local estimates. With integrations disabled, the
 deterministic straight-line travel provider is intended only for local development. Set
@@ -50,12 +51,13 @@ set the Lambda handler to `app.lambda_handler.handler`. This API Lambda is separ
 Step Functions worker handler `app.workflow_worker.lambda_handler`.
 Deploy backend code updates to the API and workflow Lambdas with `./scripts/deploy_backend.ps1` from PowerShell
 (or `powershell -ExecutionPolicy Bypass -File .\scripts\deploy_backend.ps1`). The script verifies
-the AWS account and Lambda runtime/architecture, builds a Python 3.12 x86_64 package from the
-requirements file, updates both functions, and waits for AWS to report each update complete. It
-defaults to account `265134560414`, region `ap-south-1`, and functions `ecoroute-api-286936` and
-`ecoroute-workflow-286936`; pass `-Profile`, `-Region`, `-FunctionName` (one function), or
-`-FunctionNames` (a list) to choose a target. It removes its temporary package and archive when it
-finishes.
+the AWS account and Lambda runtime/architecture, builds a Python 3.12 x86_64 Linux package from the
+requirements file, updates both functions, and waits for AWS to report each update complete. On
+Windows, it uses the installed Ubuntu WSL distribution with Python 3.12 so Linux dependency markers
+and Lambda-compatible wheels resolve correctly. It defaults to account `265134560414`, region
+`ap-south-1`, and functions `ecoroute-api-286936` and `ecoroute-workflow-286936`; pass `-Profile`,
+`-Region`, `-FunctionName` (one function), or `-FunctionNames` (a list) to choose a target. It
+removes its temporary package and archive when it finishes.
 The planner served from `web/` lets you save the API Gateway base URL in the browser after the
 static files are uploaded to Amplify. Configure API Gateway CORS to allow all origins, methods,
 and headers as well; the FastAPI CORS middleware cannot answer preflight requests intercepted by

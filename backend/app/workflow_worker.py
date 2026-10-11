@@ -5,11 +5,12 @@ from sqlalchemy import select
 from fastapi import HTTPException
 import logging
 
+from app.config import settings
 from app.db import SessionLocal
 from app import models
-from app.integrations import parse_replan_request, parse_intent, search_places
+from app.integrations import parse_replan_request, parse_intent, search_places_on_route
 from app.schemas import ReplanRequest
-from app.service import get_schedule, replan, row_stop
+from app.service import get_schedule, replan, row_stop, user_travel_mode
 
 logger=logging.getLogger(__name__)
 
@@ -32,13 +33,26 @@ def run_action(event: dict[str, Any], db=None) -> dict[str, Any]:
                     "end_location": (schedule.end_location or {}).get("label"),
                     "stops": [{"id":row.id,"title":row.title,"type":row.type,"location":row.location} for row in stop_rows],
                 }
+                bias = [
+                    schedule.start_location["longitude"],
+                    schedule.start_location["latitude"],
+                ]
             finally:
                 if owns_session:
                     session.close()
         if context is None:
-            intent = parse_intent(event.get("request_text", ""), event.get("timezone", "UTC"))
+            bias = None
+            timezone = event.get("timezone", "UTC")
         else:
-            intent = parse_intent(event.get("request_text", ""), event.get("timezone", "UTC"), context)
+            timezone = schedule.timezone or event.get("timezone", "UTC")
+        if settings.strands_agent_enabled:
+            from app.strands_agent import interpret_with_strands
+
+            intent = interpret_with_strands(event.get("request_text", ""), timezone, bias, context)
+        elif context is None:
+            intent = parse_intent(event.get("request_text", ""), timezone)
+        else:
+            intent = parse_intent(event.get("request_text", ""), timezone, context)
         return {**event, "intent": intent}
 
     owns_session = db is None
@@ -53,16 +67,18 @@ def run_action(event: dict[str, Any], db=None) -> dict[str, Any]:
         if action == "discover":
             intent = event.get("intent") or {}
             query = intent.get("destination_query") or event.get("request_text", "")
-            places = search_places(
+            places = search_places_on_route(
                 query,
-                [schedule.start_location["longitude"], schedule.start_location["latitude"]],
-                10,
+                schedule.start_location,
+                schedule.end_location,
+                user_travel_mode(session, user_id),
+                5,
             )
             return {
                 "status": "destination_candidates" if places else "needs_destination_selection",
                 "intent": intent,
                 "candidates": places,
-                "message": ("Mantle was unavailable; this request used simple phrase matching. Review the suggestions carefully. " if intent.get("intent_source")=="local_fallback" else "") + "Place results do not verify product stock or price.",
+                "message": "Place suggestions are ranked by route detour and do not verify product stock or price.",
             }
 
         if action == "replan":
@@ -82,8 +98,6 @@ def run_action(event: dict[str, Any], db=None) -> dict[str, Any]:
             request = ReplanRequest(user_id=user_id, updates=parsed_change["updates"], stop_order=parsed_change.get("stop_order"), reason=event.get("request_text") or "User requested replanning")
             proposal = replan(session, schedule_id, request)
             explanation_facts=proposal.explanation_facts
-            if parsed_change["source"]=="local_fallback":
-                explanation_facts=explanation_facts+["Mantle was unavailable; this change was interpreted with simple rules. Review the proposed timing and stop order carefully."]
             return {
                 "id": proposal.id,
                 "schedule_id": proposal.schedule_id,

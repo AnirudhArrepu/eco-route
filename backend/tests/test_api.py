@@ -206,6 +206,14 @@ def test_agent_natural_language_replan_returns_reviewable_proposal(client, sched
     schedule_id = create_schedule(client, schedule_payload)
     monkeypatch.setattr(main.settings, "step_functions_enabled", False)
     monkeypatch.setattr(main.settings, "strands_agent_enabled", False)
+    monkeypatch.setattr(main, "parse_intent", lambda *_args: {
+        "operation": "replan", "clarification_needed": False,
+    })
+    monkeypatch.setattr(main, "parse_replan_request", lambda *_args: {
+        "updates": {"stop-1": {"latest_start": "2026-10-12T17:00:00+05:30"}},
+        "stop_order": None, "optimize_route": False,
+        "clarification_question": None, "source": "strands_agent",
+    })
 
     response = client.post("/v1/agent/requests", json={
         "user_id": "local-user", "schedule_id": schedule_id, "timezone": "Asia/Kolkata",
@@ -219,6 +227,42 @@ def test_agent_natural_language_replan_returns_reviewable_proposal(client, sched
     unchanged = client.get(f"/v1/schedules/{schedule_id}", params={"user_id": "local-user"}).json()
     assert unchanged["current_revision"] == 1
     assert unchanged["stops"][0].get("latest_start") is None
+
+
+def test_agent_natural_language_appointment_move_returns_fixed_start_proposal(client, schedule_payload, destination, monkeypatch):
+    from app import main
+
+    schedule_payload["end_at"] = "2026-10-12T21:00:00+05:30"
+    schedule_payload["stops"] = [{
+        **destination,
+        "id": "dentist-1",
+        "title": "Dentist appointment",
+        "type": "appointment",
+        "fixed_start": "2026-10-12T18:00:00+05:30",
+    }]
+    schedule_id = create_schedule(client, schedule_payload)
+    monkeypatch.setattr(main.settings, "step_functions_enabled", False)
+    monkeypatch.setattr(main.settings, "strands_agent_enabled", False)
+    monkeypatch.setattr(main, "parse_intent", lambda *_args: {
+        "operation": "replan", "clarification_needed": False,
+    })
+    monkeypatch.setattr(main, "parse_replan_request", lambda *_args: {
+        "updates": {"dentist-1": {"fixed_start": "2026-10-12T18:30:00+05:30"}},
+        "stop_order": None, "optimize_route": False,
+        "clarification_question": None, "source": "strands_agent",
+    })
+
+    response = client.post("/v1/agent/requests", json={
+        "user_id": "local-user", "schedule_id": schedule_id, "timezone": "Asia/Kolkata",
+        "text": "Move my dentist appointment to 6:30 pm",
+    })
+
+    assert response.status_code == 200, response.text
+    proposal = response.json()
+    assert proposal["status"] == "pending", proposal
+    assert proposal["proposed_stops"][0]["fixed_start"] == "2026-10-12T18:30:00+05:30"
+    unchanged = client.get(f"/v1/schedules/{schedule_id}", params={"user_id": "local-user"}).json()
+    assert unchanged["stops"][0]["fixed_start"] == "2026-10-12T18:00:00"
 
 
 def test_approved_replans_stack_deadlines_on_different_stops(client, schedule_payload, destination):
@@ -255,8 +299,19 @@ def test_approved_replans_stack_deadlines_on_different_stops(client, schedule_pa
     assert saved_by_id["place-b"]["latest_start"] == "2026-10-12T21:00:00"
 
 
-def test_agent_returns_place_candidates_or_explicit_local_unavailability(client, schedule_payload):
+def test_agent_returns_place_candidates_or_explicit_local_unavailability(client, schedule_payload, monkeypatch):
+    from app import main
+
     schedule_id = create_schedule(client, schedule_payload)
+    monkeypatch.setattr(main.settings, "step_functions_enabled", False)
+    monkeypatch.setattr(main.settings, "strands_agent_enabled", False)
+    monkeypatch.setattr(main, "parse_intent", lambda *_args: {
+        "operation": "add_destination",
+        "destination_query": "phone charger",
+        "budget_inr": 800,
+        "clarification_needed": False,
+        "intent_source": "strands_agent",
+    })
     response = client.post(
         "/v1/agent/requests",
         json={"user_id": "local-user", "schedule_id": schedule_id, "text": "find a phone charger under ₹800"},

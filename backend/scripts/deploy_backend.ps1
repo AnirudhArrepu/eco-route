@@ -8,7 +8,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $backendRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$packageRoot = Join-Path $env:TEMP "ecoroute-deploy-$([guid]::NewGuid().ToString('N'))"
+$packageDirectoryName = ".lambda-deploy-$([guid]::NewGuid().ToString('N'))"
+$packageRoot = Join-Path $backendRoot $packageDirectoryName
 $archivePath = Join-Path $env:TEMP "ecoroute-deploy-$([guid]::NewGuid().ToString('N')).zip"
 $requirementsPath = Join-Path $backendRoot "infra\lambda-requirements.txt"
 $awsPrefix = @()
@@ -57,10 +58,16 @@ try {
     }
 
     New-Item -ItemType Directory -Path $packageRoot | Out-Null
-    Write-Output "Installing Python 3.12 Lambda dependencies..."
-    & python -m pip install --quiet --disable-pip-version-check --only-binary=:all: `
-        --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 --abi cp312 `
-        --target $packageRoot --requirement $requirementsPath
+    $wsl = Get-Command wsl -ErrorAction Stop
+    $installScript = "import os, platform, subprocess, sys; " +
+        "sys.version_info[:2] == (3, 12) or sys.exit('WSL must provide Python 3.12'); " +
+        "platform.machine() == 'x86_64' or sys.exit('WSL must be x86_64'); " +
+        "args = [sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', " +
+        "'--break-system-packages', '--ignore-installed', '--only-binary=:all:', '--target', sys.argv[1], " +
+        "'--requirement', os.path.join('infra', 'lambda-requirements.txt')]; " +
+        "sys.exit(subprocess.call(args))"
+    Write-Output "Installing Python 3.12 Linux Lambda dependencies in WSL..."
+    & $wsl.Source -d Ubuntu --cd $backendRoot -- python3 -c $installScript $packageDirectoryName
     if ($LASTEXITCODE -ne 0) {
         throw "Could not install the Lambda dependency package."
     }

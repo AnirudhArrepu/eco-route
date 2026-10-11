@@ -165,8 +165,9 @@ This is a route-distance comparison; it does not calculate fuel use or carbon em
 ### Extract errands from a new-plan request
 
 Before previewing a new plan, the frontend can ask the task extractor to split the request into
-distinct errands and explicit time constraints. The user must select an exact place for each task
-from `/v1/places/search` before it is included in the schedule.
+distinct errands and explicit time constraints. Route-search candidates can be ranked and
+preselected between the planned start and end locations; the user can still choose an exact place
+with `/v1/places/search`.
 
 `POST /v1/agent/extract-tasks`
 
@@ -186,14 +187,18 @@ Response:
     {
       "title": "Grocery store",
       "destination_query": "grocery store",
+      "type": "errand",
       "duration_minutes": null,
+      "latest_start": null,
       "latest_end": "2026-10-11T17:00:00+05:30",
       "fixed_start": null
     },
     {
       "title": "Pharmacy",
       "destination_query": "pharmacy",
+      "type": "errand",
       "duration_minutes": null,
+      "latest_start": null,
       "latest_end": "2026-10-11T17:00:00+05:30",
       "fixed_start": null
     }
@@ -202,9 +207,14 @@ Response:
 }
 ```
 
+The response is produced by the Strands agent using the configured OpenAI-compatible Bedrock Mantle
+endpoint. Appointment tasks have `type: "appointment"` even when no appointment time was given.
 Only explicit durations and times should be treated as extracted facts. If duration is omitted, the
 frontend may offer a clearly marked editable estimate. Include each selected destination in the
 schedule `stops` array, then use the existing preview and create sequence.
+An arrival request such as “be at the pharmacy by 5 pm” maps to `latest_start`; a completion
+deadline maps to `latest_end`; an exact appointment time maps to `fixed_start`. Keep those fields
+distinct when constructing stops so the planner can validate the requested semantics.
 
 ### Create a plan
 
@@ -300,6 +310,23 @@ These calls derive the owner from the bearer token; `user_id` query parameter is
 both. Response is `{ "places": [...] }`; each place includes `id`, `title`, `label`, `latitude`,
 `longitude`, and `categories` when available.
 
+### Rank places by route detour
+
+`POST /v1/places/route-search` accepts a place query and the planned start/end locations:
+
+```json
+{
+  "query": "pharmacy",
+  "start_location": { "latitude": 13.0827, "longitude": 80.2707 },
+  "end_location": { "latitude": 13.0827, "longitude": 80.2707 },
+  "max_results": 3
+}
+```
+
+The response contains real place candidates ranked by added routed distance. Each candidate includes
+`route_rank`, `route_km`, and `detour_km` alongside its place identity and coordinates. Natural-
+language requests to add a stop return the same route-ranked candidate shape.
+
 ### Ask the agent to find a destination or replan
 
 `POST /v1/agent/requests`
@@ -339,6 +366,9 @@ contains `status`, `result`, `error`, and `cause`. On success, a place search re
         "label": "<formatted address>",
         "latitude": 13.08,
         "longitude": 80.27,
+        "route_rank": 1,
+        "route_km": 3.42,
+        "detour_km": 0.61,
         "categories": []
       }
     ],
