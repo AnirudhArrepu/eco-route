@@ -16,7 +16,14 @@ class ParsedIntent(BaseModel):
     clarification_question: str | None = None
 
 
-def interpret_with_strands(text: str, timezone: str = "UTC", bias: list[float] | None = None) -> dict:
+def interpret_with_strands(text: str, timezone: str = "UTC", bias: list[float] | None = None, schedule_context: dict | None = None) -> dict:
+    from app.integrations import _explicit_add_destination, _explicit_replan_for_current_stop
+    if _explicit_replan_for_current_stop(text, schedule_context):
+        return ParsedIntent(operation="replan", clarification_needed=False).model_dump()
+    explicit_query = _explicit_add_destination(text) if schedule_context else None
+    if explicit_query:
+        return ParsedIntent(operation="add_destination", destination_query=explicit_query,
+                            clarification_needed=False).model_dump()
     if not settings.mantle_enabled:
         raise HTTPException(503, "OPENAI_API_KEY and OPENAI_BASE_URL are required for the Mantle agent")
     if not settings.bedrock_model_id:
@@ -59,16 +66,21 @@ def interpret_with_strands(text: str, timezone: str = "UTC", bias: list[float] |
                 "Never claim inventory, price, opening hours, or emissions unless returned by a tool. "
                 "Do not modify a schedule or approve proposals. End with one JSON object containing "
                 "operation, destination_query, budget_inr, clarification_needed, clarification_question. "
-                "Allowed operation values are add_destination, replan, create_schedule, clarify."
+                "Allowed operation values are add_destination, replan, create_schedule, clarify. "
+                "For explicit additional-place requests, choose add_destination. If schedule context is "
+                "provided, use it to resolve an omitted city and do not ask for a city or location. "
+                "When the user asks to move, delay, advance, extend, shorten, reorder, or optimize an existing stop or route, "
+                "choose replan. Do not classify a requested change to an existing stop as add_destination."
             ),
         )
-        result = agent(f"Timezone: {timezone}\nUser request: {text}")
+        result = agent(f"Timezone: {timezone}\nCurrent schedule context: {schedule_context or {}}\nUser request: {text}")
         structured = getattr(result, "structured_output", None)
         if isinstance(structured, ParsedIntent):
-            return structured.model_dump()
-        rendered = str(result)
-        parsed_text = rendered[rendered.find("{") : rendered.rfind("}") + 1]
-        parsed = ParsedIntent.model_validate(json.loads(parsed_text))
+            parsed = structured
+        else:
+            rendered = str(result)
+            parsed_text = rendered[rendered.find("{") : rendered.rfind("}") + 1]
+            parsed = ParsedIntent.model_validate(json.loads(parsed_text))
         return parsed.model_dump()
     except HTTPException:
         raise

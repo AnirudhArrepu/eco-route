@@ -12,7 +12,7 @@ def test_schedule_proposal_approval_and_revision_flow(client, schedule_payload, 
     )
     assert proposal_response.status_code == 200, proposal_response.text
     proposal = proposal_response.json()
-    assert proposal["status"] == "pending"
+    assert proposal["status"] == "pending", proposal
 
     unchanged = client.get(f"/v1/schedules/{schedule_id}", params={"user_id": "local-user"}).json()
     assert unchanged["current_revision"] == 1
@@ -197,6 +197,62 @@ def test_replan_creates_a_proposal_without_mutating_schedule(client, schedule_pa
     unchanged = client.get(f"/v1/schedules/{schedule_id}", params={"user_id": "local-user"}).json()
     assert unchanged["current_revision"] == 1
     assert unchanged["stops"][0]["duration_minutes"] == 30
+
+
+def test_agent_natural_language_replan_returns_reviewable_proposal(client, schedule_payload, destination, monkeypatch):
+    from app import main
+
+    schedule_payload["stops"] = [{**destination, "id": "stop-1", "title": "Pharmacy"}]
+    schedule_id = create_schedule(client, schedule_payload)
+    monkeypatch.setattr(main.settings, "step_functions_enabled", False)
+    monkeypatch.setattr(main.settings, "strands_agent_enabled", False)
+
+    response = client.post("/v1/agent/requests", json={
+        "user_id": "local-user", "schedule_id": schedule_id, "timezone": "Asia/Kolkata",
+        "text": "need to be at pharmacy by 5pm",
+    })
+
+    assert response.status_code == 200, response.text
+    proposal = response.json()
+    assert proposal["status"] == "pending", proposal
+    assert proposal["proposed_stops"][0]["latest_start"] == "2026-10-12T17:00:00+05:30"
+    unchanged = client.get(f"/v1/schedules/{schedule_id}", params={"user_id": "local-user"}).json()
+    assert unchanged["current_revision"] == 1
+    assert unchanged["stops"][0].get("latest_start") is None
+
+
+def test_approved_replans_stack_deadlines_on_different_stops(client, schedule_payload, destination):
+    schedule_payload["end_at"] = "2026-10-12T22:00:00+05:30"
+    schedule_payload["stops"] = [
+        {**destination, "id": "place-a", "title": "Place A"},
+        {**destination, "id": "place-b", "title": "Place B", "location": {"latitude": 13.03, "longitude": 80.23}},
+    ]
+    schedule_id = create_schedule(client, schedule_payload)
+
+    first = client.post(f"/v1/schedules/{schedule_id}/replan", json={
+        "user_id": "local-user", "updates": {"place-a": {"latest_start": "2026-10-12T17:00:00+05:30"}},
+    }).json()
+    assert first["status"] == "pending"
+    approved_first = client.post(f"/v1/proposals/{first['id']}/approve", json={
+        "user_id": "local-user", "idempotency_key": "approve-place-a-deadline",
+    })
+    assert approved_first.status_code == 200, approved_first.text
+
+    second = client.post(f"/v1/schedules/{schedule_id}/replan", json={
+        "user_id": "local-user", "updates": {"place-b": {"latest_start": "2026-10-12T21:00:00+05:30"}},
+    }).json()
+    assert second["status"] == "pending"
+    proposed = {stop["id"]: stop for stop in second["proposed_stops"]}
+    assert proposed["place-a"]["latest_start"] == "2026-10-12T17:00:00+05:30"
+    assert proposed["place-b"]["latest_start"] == "2026-10-12T21:00:00+05:30"
+    approved_second = client.post(f"/v1/proposals/{second['id']}/approve", json={
+        "user_id": "local-user", "idempotency_key": "approve-place-b-deadline",
+    })
+    assert approved_second.status_code == 200, approved_second.text
+    saved = client.get(f"/v1/schedules/{schedule_id}", params={"user_id": "local-user"}).json()
+    saved_by_id = {stop["id"]: stop for stop in saved["stops"]}
+    assert saved_by_id["place-a"]["latest_start"] == "2026-10-12T17:00:00"
+    assert saved_by_id["place-b"]["latest_start"] == "2026-10-12T21:00:00"
 
 
 def test_agent_returns_place_candidates_or_explicit_local_unavailability(client, schedule_payload):

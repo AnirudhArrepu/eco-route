@@ -64,6 +64,7 @@ class AddStopRequest(BaseModel):
 class ReplanRequest(BaseModel):
     user_id: str | None = None
     updates: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    stop_order: list[str] | None = None
     constraints: list[ConstraintIn] = Field(default_factory=list)
     allow_reordering_flexible_stops: bool = True
     max_reordered_stops: int = Field(default=3, ge=0, le=8)
@@ -79,6 +80,12 @@ class TaskExtractionRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
     date: date
     timezone: str = "UTC"
+
+class RoutePlaceSearchRequest(BaseModel):
+    query: str = Field(min_length=2, max_length=300)
+    start_location: Location
+    end_location: Location
+    max_results: int = Field(default=3, ge=1, le=3)
 
 class PreferenceUpdate(BaseModel):
     value: dict[str, Any]

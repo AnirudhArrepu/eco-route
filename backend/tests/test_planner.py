@@ -73,3 +73,59 @@ def test_schedule_optimizer_caches_route_legs_across_orders():
     result=optimize_schedule(request,provider)
     assert result["feasible"]
     assert len(provider.calls)==len(set(provider.calls))
+
+
+def test_schedule_optimizer_prioritizes_shorter_route_for_climate_goal():
+    class TradeoffProvider:
+        def leg(self, origin, destination, mode="Walking"):
+            route = (origin["latitude"], destination["latitude"])
+            distances = {(0, 1): 1, (1, 2): 1, (2, 3): 1, (0, 2): 2, (2, 1): 2, (1, 3): 1,
+                         (0, 3): 1, (1, 0): 1, (2, 0): 2}
+            minutes = {(0, 1): 60, (1, 2): 60, (2, 3): 60, (0, 2): 1, (2, 1): 1, (1, 3): 1,
+                       (0, 3): 1, (1, 0): 1, (2, 0): 1}
+            return Leg(minutes.get(route, 1), distances.get(route, 1))
+
+    first, second = stop("first", 1, 0), stop("second", 2, 0)
+    request = req([first, second], [])
+    request["start_location"] = {"latitude": 0, "longitude": 0}
+    request["end_location"] = {"latitude": 3, "longitude": 0}
+
+    result = optimize_schedule(request, TradeoffProvider())
+
+    assert result["feasible"]
+    assert [item["id"] for item in result["stops"]] == ["first", "second"]
+    assert result["metrics"]["after"]["distance_km"] == 3
+    assert result["metrics"]["objective"] == "minimum feasible route distance"
+
+
+def test_distance_savings_estimates_co2_using_selected_travel_mode():
+    from app.planner import calculate_distance_savings
+
+    request = req([], [])
+    request["start_location"] = {"latitude": 0, "longitude": 0}
+    request["end_location"] = {"latitude": 0, "longitude": 0}
+    provider = MockTravelProvider()
+    stop_item = stop("errand", 1, 0, 10)
+    stop_item["location"] = {"latitude": 1, "longitude": 0}
+
+    car = calculate_distance_savings([stop_item], request, provider, "Car", planned_km=10)
+    walking = calculate_distance_savings([stop_item], request, provider, "Walking", planned_km=10)
+
+    assert car["estimated_co2_saved_kg"] == round(car["saved_km"] * 0.140, 3)
+    assert car["co2_factor_source_url"].startswith("https://")
+    assert walking["estimated_co2_saved_kg"] == 0
+
+
+def test_schedule_optimizer_improves_orders_with_more_than_eight_stops():
+    input_stops = [stop(f"s{index}", index / 1000, 0, 1) for index in [5, 9, 4, 8, 3, 7, 2, 6, 1]]
+    request = req(input_stops, [])
+    request["start_location"] = {"latitude": 0, "longitude": 0}
+    request["end_location"] = {"latitude": 0, "longitude": 0}
+
+    baseline = plan(request, MockTravelProvider())
+    result = optimize_schedule(request, MockTravelProvider())
+
+    assert result["feasible"]
+    assert result["search_truncated"] is True
+    assert result["evaluated_orders"] > 1
+    assert result["metrics"]["after"]["distance_km"] < baseline["metrics"]["after"]["distance_km"]

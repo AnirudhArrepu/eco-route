@@ -65,17 +65,18 @@ export default function ChatPanel({ open, onClose, schedule, onProposal }) {
   }
   const question = response?.question || response?.intent?.clarification_question
   const isDiscovery = response?.status === 'destination_candidates' || response?.status === 'needs_destination_selection'
+  const needsDestinationSearch = isDiscovery || (response?.status === 'clarification_required' && response?.intent?.operation === 'add_destination')
   return <BottomSheet open={open} onClose={onClose} title="Ask EcoRoute" className="assistant-sheet">
     <div className="assistant-content">
       <div className="assistant-history">
-      <p className="text-xs leading-5 text-neutral-500">Find a destination or request a supported change to this plan. Each request is independent. For a clarification, revise your full request with the answer included.</p>
+      <p className="text-xs leading-5 text-neutral-500">Ask for a new stop, change a stop’s time or duration, set a visit order, or optimize the route. Requests create a proposal for your review; they do not change the saved plan until approved.</p>
       {!sent && !response && !workflow.busy && <ChatMessage>What would make your day a little easier? Try “Find a pharmacy near my starting point”.</ChatMessage>}
       {sent && <ChatMessage role="user">{sent}</ChatMessage>}
       {question && <ChatMessage>{question}</ChatMessage>}
       {response?.message && <ChatMessage>{response.message}</ChatMessage>}
       {isDiscovery && <DestinationSuggestions candidates={response.candidates} selected={selected} onSelect={choose} />}
-      {response && !question && !isDiscovery && !response.proposed_stops && <ChatMessage>The request finished without destination suggestions. Please send a specific place request or use direct search.</ChatMessage>}
-      {(isDiscovery || question) && <PlaceSearch label="Or search for a destination" value={selected} onChange={choose} bias={schedule.start_location} />}
+      {response && !question && !isDiscovery && !response.proposed_stops && !response.message && <ChatMessage>The request finished without destination suggestions. Please send a specific place request or use direct search.</ChatMessage>}
+      {needsDestinationSearch && <PlaceSearch label="Or search for a destination" value={selected} onChange={choose} bias={schedule.start_location} />}
       {selected && <form onSubmit={propose} className="grid gap-4 rounded-xl border border-neutral-200 p-4">
         <p className="text-sm font-medium">Add this destination to your day</p>
         <Input label="Task title" required maxLength={256} value={task} onChange={e => setTask(e.target.value)} />

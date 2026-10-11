@@ -7,6 +7,10 @@ from math import factorial
 from math import asin, cos, radians, sin, sqrt
 from typing import Any, Protocol
 
+CAR_CO2_KG_PER_KM = 0.140
+CAR_CO2_FACTOR_SOURCE = "WRI India-specific road transport factors (2015), gasoline hatchback under 1,400 cc with 8% uplift"
+CAR_CO2_FACTOR_SOURCE_URL = "https://shaktifoundation.in/wp-content/uploads/2022/04/WRI-2015-India-Specific-Road-Transport-Emission-Factors.pdf"
+
 
 @dataclass(frozen=True)
 class Leg:
@@ -201,7 +205,6 @@ def plan(req, provider=None, mode="Walking"):
         return {"feasible": False, "stops": existing, "metrics": {"before": before, "after": None}, "conflicts": [{"constraint_type": "candidate_limit", "reason": "No candidate positions were evaluated"}], "explanation_facts": ["Increase the candidate evaluation limit and try again."]}
 
     valid = []
-    weights = req.get("weights", {"travel_time": 5, "distance": 1, "disruption": 4})
     original_ids = [s["id"] for s in existing]
     for candidate in candidates:
         after, _ = metrics(candidate, req, provider, mode)
@@ -209,12 +212,12 @@ def plan(req, provider=None, mode="Walking"):
             continue
         common = [s["id"] for s in candidate if s["id"] in original_ids]
         disruption = sum(a != b for a, b in zip(original_ids, common))
-        score = weights.get("travel_time", 5) * after["travel_minutes"] / max(60, before["travel_minutes"]) + weights.get("distance", 1) * after["distance_km"] / max(10, before["distance_km"]) + weights.get("disruption", 4) * disruption / max(1, len(existing))
-        valid.append((score, candidate, after))
+        objective = _route_objective(after, disruption, candidate)
+        valid.append((objective, candidate, after))
     if not valid:
         return {"feasible": False, "stops": existing, "metrics": {"before": before, "after": None}, "conflicts": [{"constraint_type": "no_feasible_candidate", "reason": "No candidate plan satisfies hard constraints"}], "explanation_facts": ["Try another destination or adjust a user-approved constraint."]}
-    score, best, after = min(valid, key=lambda item: (item[0], [s["id"] for s in item[1]]))
-    return {"feasible": True, "stops": best, "metrics": {"before": before, "after": after, "score": score}, "conflicts": [], "explanation_facts": [f"Travel time changes by {after['travel_minutes'] - before['travel_minutes']:+.1f} minutes.", "All configured hard constraints passed validation."]}
+    objective, best, after = min(valid, key=lambda item: item[0])
+    return {"feasible": True, "stops": best, "metrics": {"before": before, "after": after, "score": objective[0], "objective": "minimum feasible route distance"}, "conflicts": [], "explanation_facts": [f"Travel time changes by {after['travel_minutes'] - before['travel_minutes']:+.1f} minutes.", "Selected the shortest feasible route; travel distance is used as a proxy for lower vehicle emissions.", "All configured hard constraints passed validation."]}
 
 
 class CachedTravelProvider:
@@ -235,6 +238,17 @@ class CachedTravelProvider:
         return self.cache[key]
 
 
+def _route_objective(metrics_after, disruption, stops):
+    """Prefer the shortest feasible route; use time and disruption as tie-breakers."""
+    return (
+        round(metrics_after["distance_km"], 6),
+        round(metrics_after["travel_minutes"], 4),
+        round(metrics_after["waiting_minutes"], 4),
+        disruption,
+        tuple(stop["id"] for stop in stops),
+    )
+
+
 def optimize_schedule(req, provider=None, mode="Walking"):
     """Find the lowest-cost feasible ordering within a bounded search budget."""
     provider = CachedTravelProvider(provider or MockTravelProvider())
@@ -244,26 +258,78 @@ def optimize_schedule(req, provider=None, mode="Walking"):
     savings = calculate_distance_savings(stops, req, provider, mode, None)
     separate_trip_km = savings["baseline_km"]
     budget = max(1, int(req.get("max_candidate_evaluations", 500)))
-    # A schedule with many stops can still be planned safely: enumerate a bounded
-    # subset of stable input-order permutations, and tell callers when search was capped.
-    possibilities = permutations(stops) if len(stops) <= 8 else iter([tuple(stops)])
+    # Exhaustively search small itineraries. For larger ones, start from several
+    # practical orders and improve the best feasible route with bounded 2-opt moves.
     search_truncated = len(stops) > 8 or factorial(len(stops)) > budget
     best = None
     evaluated = 0
     all_conflicts = []
-    for candidate in possibilities:
+
+    def consider(candidate):
+        nonlocal best, evaluated
         if evaluated >= budget:
-            break
+            return
+        candidate = list(candidate)
         evaluated += 1
-        after, conflicts = metrics(list(candidate), req, provider, mode)
+        after, conflicts = metrics(candidate, req, provider, mode)
         if not after["feasible"]:
             all_conflicts.extend(conflicts)
-            continue
+            return
         disruption = sum(a != b for a, b in zip([s["id"] for s in stops], [s["id"] for s in candidate]))
-        score = after["travel_minutes"] + after["distance_km"] * 0.1 + disruption * 2 + after["waiting_minutes"] * 0.25
-        tie_break = tuple(s["id"] for s in candidate)
-        if best is None or (score, tie_break) < (best[0], best[1]):
-            best = (score, tie_break, list(candidate), after)
+        objective = _route_objective(after, disruption, candidate)
+        if best is None or objective < best[0]:
+            best = (objective, candidate, after)
+
+    if len(stops) <= 8:
+        for candidate in permutations(stops):
+            if evaluated >= budget:
+                break
+            consider(candidate)
+    else:
+        original = list(stops)
+        seeds = [original, list(reversed(original))]
+        deadline_order = sorted(
+            stops,
+            key=lambda stop: (stop.get("fixed_start") or stop.get("latest_start") or stop.get("latest_end") or "9999", stop["id"]),
+        )
+        seeds.append(deadline_order)
+        remaining = list(stops)
+        current = req["start_location"]
+        nearest_order = []
+        while remaining:
+            next_stop = min(
+                remaining,
+                key=lambda stop: (
+                    provider.leg(current, stop["location"], mode).distance_km,
+                    stop.get("fixed_start") or stop.get("latest_start") or stop.get("latest_end") or "9999",
+                    stop["id"],
+                ),
+            )
+            nearest_order.append(next_stop)
+            current = next_stop["location"]
+            remaining.remove(next_stop)
+        seeds.append(nearest_order)
+
+        seen_orders = set()
+        for seed in seeds:
+            marker = tuple(stop["id"] for stop in seed)
+            if marker not in seen_orders:
+                seen_orders.add(marker)
+                consider(seed)
+
+        while best is not None and evaluated < budget:
+            previous_objective = best[0]
+            current_order = best[1]
+            for left in range(len(current_order) - 1):
+                for right in range(left + 1, len(current_order)):
+                    candidate = current_order[:left] + list(reversed(current_order[left : right + 1])) + current_order[right + 1 :]
+                    consider(candidate)
+                    if evaluated >= budget:
+                        break
+                if evaluated >= budget:
+                    break
+            if best[0] >= previous_objective:
+                break
 
     if best is None:
         unique_conflicts = []
@@ -277,10 +343,10 @@ def optimize_schedule(req, provider=None, mode="Walking"):
             unique_conflicts = [{"constraint_type": "candidate_limit", "reason": "No schedule order was evaluated"}]
         return {"feasible": False, "stops": stops, "metrics": {"before": None, "after": None}, "conflicts": unique_conflicts, "explanation_facts": ["No ordering in the evaluated search budget satisfies all hard constraints."], "evaluated_orders": evaluated, "search_truncated": search_truncated}
 
-    _, _, ordered, after = best
+    objective, ordered, after = best
     savings = calculate_distance_savings(ordered, req, provider, mode, after["distance_km"])
     after["distance_savings"] = savings
-    return {"feasible": True, "stops": ordered, "metrics": {"before": {"distance_km": round(separate_trip_km, 2)}, "after": after, "distance_savings": savings, "score": round(best[0], 3)}, "conflicts": [], "explanation_facts": [f"Evaluated {evaluated} itinerary order(s).", f"Estimated travel: {after['travel_minutes']:.1f} minutes over {after['distance_km']:.1f} km.", "All configured hard constraints passed validation."], "evaluated_orders": evaluated, "search_truncated": search_truncated}
+    return {"feasible": True, "stops": ordered, "metrics": {"before": {"distance_km": round(separate_trip_km, 2)}, "after": after, "distance_savings": savings, "score": objective[0], "objective": "minimum feasible route distance"}, "conflicts": [], "explanation_facts": [f"Evaluated {evaluated} itinerary order(s).", f"Estimated travel: {after['travel_minutes']:.1f} minutes over {after['distance_km']:.1f} km.", "Selected the shortest feasible route; travel distance is used as a proxy for lower vehicle emissions.", "All configured hard constraints passed validation."], "evaluated_orders": evaluated, "search_truncated": search_truncated}
 
 
 def calculate_distance_savings(stops, req, provider, mode, planned_km):
@@ -294,11 +360,21 @@ def calculate_distance_savings(stops, req, provider, mode, planned_km):
     if planned_km is None:
         return {"baseline_km": round(separate_trip_km, 2), "planned_km": None,
                 "saved_km": None, "saved_percent": None,
+                "estimated_co2_saved_kg": None, "estimated_co2_added_kg": None,
+                "co2_factor_kg_per_km": CAR_CO2_KG_PER_KM if mode == "Car" else 0.0,
+                "co2_factor_source": CAR_CO2_FACTOR_SOURCE if mode == "Car" else "Zero direct tailpipe CO2 assumed for walking and bicycle modes",
+                "co2_factor_source_url": CAR_CO2_FACTOR_SOURCE_URL if mode == "Car" else None,
                 "baseline": "one separate start-to-finish journey per stop"}
     difference = round(separate_trip_km - planned_km, 2)
+    co2_factor = CAR_CO2_KG_PER_KM if mode == "Car" else 0.0
     return {"baseline_km": round(separate_trip_km, 2), "planned_km": round(planned_km, 2),
             "saved_km": max(0, difference), "additional_km": max(0, -difference),
             "saved_percent": round(max(0, difference) / separate_trip_km * 100, 1) if separate_trip_km else 0,
+            "estimated_co2_saved_kg": round(max(0, difference) * co2_factor, 3),
+            "estimated_co2_added_kg": round(max(0, -difference) * co2_factor, 3),
+            "co2_factor_kg_per_km": co2_factor,
+            "co2_factor_source": CAR_CO2_FACTOR_SOURCE if mode == "Car" else "Zero direct tailpipe CO2 assumed for walking and bicycle modes",
+            "co2_factor_source_url": CAR_CO2_FACTOR_SOURCE_URL if mode == "Car" else None,
             "separate_trips": len(stops), "combined_trips": 1 if stops else 0,
             "trips_saved": max(0, len(stops) - 1),
             "baseline": "one separate start-to-finish journey per stop"}

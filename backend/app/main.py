@@ -8,9 +8,9 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import Base, engine, get_db
 from app import models
-from app.schemas import ScheduleCreate, SchedulePreview, AddStopRequest, ReplanRequest, AgentRequest, TaskExtractionRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate, SignUpRequest, ConfirmSignUpRequest, EmailRequest, LoginRequest, RefreshTokenRequest
-from app.service import create_schedule, preview_schedule, get_schedule, get_schedule_timeline, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid
-from app.integrations import parse_intent, search_places, infer_replan_updates, extract_tasks
+from app.schemas import ScheduleCreate, SchedulePreview, AddStopRequest, ReplanRequest, AgentRequest, TaskExtractionRequest, RoutePlaceSearchRequest, ApproveRequest, RejectRequest, PreferenceIn, PreferenceUpdate, RoutineCreate, RoutineUpdate, SignUpRequest, ConfirmSignUpRequest, EmailRequest, LoginRequest, RefreshTokenRequest
+from app.service import create_schedule, preview_schedule, get_schedule, get_schedule_timeline, add_destination, replan, get_proposal, approve, reject, snapshot, row_stop, uid, user_travel_mode
+from app.integrations import parse_intent, parse_replan_request, search_places, search_places_on_route, extract_tasks
 from app.auth import authenticated_user, resolve_user_id
 from app import cognito
 from app.strands_agent import interpret_with_strands
@@ -111,6 +111,17 @@ def place_search(query:str,latitude:float|None=None,longitude:float|None=None,pr
         raise HTTPException(422,"longitude must be between -180 and 180")
     return {"places":search_places(query,bias,10)}
 
+@app.post("/v1/places/route-search")
+def route_place_search(req:RoutePlaceSearchRequest,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
+    mode=user_travel_mode(db,principal) if principal else "Walking"
+    return {"places":search_places_on_route(
+        req.query,
+        req.start_location.model_dump(mode="json"),
+        req.end_location.model_dump(mode="json"),
+        mode,
+        req.max_results,
+    )}
+
 @app.get("/v1/schedules/{sid}")
 def read_schedule(sid:str,user_id:str|None=None,db:Session=Depends(get_db),principal:str|None=Depends(authenticated_user)):
     user_id=owner(user_id,principal)
@@ -139,14 +150,22 @@ def agent(req:AgentRequest,db:Session=Depends(get_db),principal:str|None=Depends
     req=req.model_copy(update={"user_id":owner(req.user_id,principal)})
     if settings.step_functions_enabled:
         return start_planning_execution(user_id=req.user_id,text=req.text,schedule_id=req.schedule_id,timezone=req.timezone)
+    schedule_context=None
+    bias=None
+    if req.schedule_id:
+        schedule=get_schedule(db,req.schedule_id,req.user_id)
+        rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==schedule.id).order_by(models.Stop.order_index)).all()
+        schedule_context={
+            "date":schedule.schedule_date.isoformat(),
+            "start_location":schedule.start_location.get("label"),
+            "end_location":schedule.end_location.get("label"),
+            "stops":[{"id":row.id,"title":row.title,"type":row.type,"location":row.location} for row in rows],
+        }
+        bias=[schedule.start_location["longitude"],schedule.start_location["latitude"]]
     if settings.strands_agent_enabled:
-        bias=None
-        if req.schedule_id:
-            schedule=get_schedule(db,req.schedule_id,req.user_id)
-            bias=[schedule.start_location["longitude"],schedule.start_location["latitude"]]
-        intent=interpret_with_strands(req.text,req.timezone,bias)
+        intent=interpret_with_strands(req.text,req.timezone,bias,schedule_context)
     else:
-        intent=parse_intent(req.text,req.timezone)
+        intent=parse_intent(req.text,req.timezone,schedule_context)
     if intent.get("clarification_needed"):
         return {"status":"clarification_required","question":intent.get("clarification_question"),"intent":intent}
     op=intent.get("operation","clarify")
@@ -155,13 +174,31 @@ def agent(req:AgentRequest,db:Session=Depends(get_db),principal:str|None=Depends
         s=get_schedule(db,req.schedule_id,req.user_id)
         query=intent.get("destination_query") or req.text
         places=search_places(query,[s.start_location["longitude"],s.start_location["latitude"]],10)
-        return {"status":"destination_candidates" if places else "needs_destination_selection","intent":intent,"candidates":places,"message":"Choose a place, verify any product details, then submit it to the stops endpoint."}
+        message="Choose a place, verify any product details, then submit it to the stops endpoint."
+        if intent.get("intent_source")=="local_fallback":
+            message="The language model was unavailable; this request was interpreted with simple rules. Review the place suggestions carefully. " + message
+        return {"status":"destination_candidates" if places else "needs_destination_selection","intent":intent,"candidates":places,"message":message}
     if op=="replan":
         if not req.schedule_id: raise HTTPException(422,"schedule_id is required")
         schedule=get_schedule(db,req.schedule_id,req.user_id)
         rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==schedule.id).order_by(models.Stop.order_index)).all()
-        updates=infer_replan_updates(req.text,[row_stop(row) for row in rows])
-        return proposal_json(replan(db,req.schedule_id,ReplanRequest(user_id=req.user_id,updates=updates,reason=req.text)))
+        stops=[row_stop(row) for row in rows]
+        parsed_change=parse_replan_request(req.text,stops,schedule.timezone or req.timezone,{
+            "date":schedule.schedule_date.isoformat(),
+            "start_at":schedule.start_at.isoformat(),
+            "end_at":schedule.end_at.isoformat(),
+            "start_location":(schedule.start_location or {}).get("label"),
+            "end_location":(schedule.end_location or {}).get("label"),
+        })
+        if parsed_change["clarification_question"]:
+            return {"status":"clarification_required","question":parsed_change["clarification_question"],"intent":intent}
+        if not parsed_change["updates"] and parsed_change.get("stop_order") is None and not parsed_change.get("optimize_route"):
+            return {"status":"clarification_required","question":"What should change? You can adjust a stop's time or duration, choose a stop order, or ask me to optimize the route.","intent":intent}
+        change=ReplanRequest(user_id=req.user_id,updates=parsed_change["updates"],stop_order=parsed_change.get("stop_order"),reason=req.text)
+        result=proposal_json(replan(db,req.schedule_id,change))
+        if parsed_change["source"]=="local_fallback":
+            result["explanation_facts"].append("Mantle was unavailable; this change was interpreted with simple rules. Review the proposed timing and stop order carefully.")
+        return result
     return {"status":"clarification_required","question":"Create a schedule first, then provide its schedule_id to add destinations or replan.","intent":intent}
 
 @app.get("/v1/proposals/{pid}")

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 
 from app import auth, workflows
 from app.config import settings
-from app.integrations import infer_replan_updates, parse_intent
+from app.integrations import extract_tasks, infer_replan_updates, parse_intent, search_places_on_route
 from app.main import app
 from app.auth import authenticated_user
 from fastapi.testclient import TestClient
@@ -168,6 +168,16 @@ def test_step_functions_definition_and_worker_interpret_contract(monkeypatch):
     assert result["user_id"] == "user-1"
 
 
+def test_workflow_worker_returns_retryable_error_for_planning_http_exception(monkeypatch):
+    from fastapi import HTTPException
+    from app import workflow_worker
+    monkeypatch.setattr(workflow_worker, "run_action", lambda event: (_ for _ in ()).throw(HTTPException(502, "provider details")))
+    result=workflow_worker.lambda_handler({"action":"replan"},None)
+    assert result["status"] == "error"
+    assert "temporarily unavailable" in result["message"]
+    assert result["error_code"] == "planning_502"
+
+
 def test_replan_understands_explicit_meeting_extension():
     stops = [{"id": "meeting-1", "title": "Daily sync", "type": "meeting", "duration_minutes": 30}]
     assert infer_replan_updates("My meeting was extended by 45 minutes", stops) == {"meeting-1": {"duration_minutes": 75}}
@@ -180,6 +190,157 @@ def test_replan_does_not_guess_which_stop_was_extended():
         {"id": "meeting-2", "title": "Client sync", "type": "meeting", "duration_minutes": 30},
     ]
     assert infer_replan_updates("My meeting was extended by 45 minutes", stops) == {}
+
+
+def test_existing_stop_and_deadline_are_classified_as_replan():
+    stops = [{"id": "stop-theatre", "title": "Theatre", "location": {"label": "City Auditorium"}}]
+    context = {"stops": stops}
+    result = parse_intent("need to be at the theatre by 5pm", "Asia/Kolkata", context)
+    assert result["operation"] == "replan"
+    assert result["intent_source"] == "existing_schedule_stop"
+
+
+def test_mantle_intent_request_failure_uses_explicit_phrase_fallback(monkeypatch):
+    from pydantic import SecretStr
+    from app import integrations
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            raise TimeoutError("simulated Mantle timeout")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    result=integrations.parse_intent("Find a pharmacy near Chennai Central", "Asia/Kolkata")
+    assert result["operation"] == "add_destination"
+    assert result["intent_source"] == "local_fallback"
+    assert result["fallback_reason"] == "mantle_request_failed"
+
+
+def test_replan_parser_maps_arrive_by_time_to_latest_start(monkeypatch):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from app import integrations
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=(
+                '```json\n{"updates":{"theatre-1":{"latest_start":"2026-10-12T17:00:00+05:30"}},'
+                '"stop_order":null,"optimize_route":false,"clarification_question":null}\n```'
+            )))])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    result = integrations.parse_replan_request("need to be at the theatre by 5pm", [
+        {"id": "theatre-1", "title": "Theatre", "duration_minutes": 30}
+    ], "Asia/Kolkata", {"date": "2026-10-12"})
+    assert result["updates"] == {"theatre-1": {"latest_start": "2026-10-12T17:00:00+05:30"}}
+
+
+def test_replan_parser_recovers_named_deadline_when_mantle_times_out(monkeypatch):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from app import integrations
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            raise TimeoutError("simulated Mantle timeout")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    result=integrations.parse_replan_request("need to be at the theatre by 5pm", [
+        {"id": "theatre-1", "title": "Theatre", "duration_minutes": 30}
+    ], "Asia/Kolkata", {"date": "2026-10-12"})
+    assert result["updates"] == {"theatre-1": {"latest_start": "2026-10-12T17:00:00+05:30"}}
+    assert result["source"] == "explicit_rule"
+
+
+def test_explicit_named_stop_deadline_does_not_depend_on_mantle(monkeypatch):
+    from app import integrations
+
+    from pydantic import SecretStr
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("configured-for-test"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    result = integrations.parse_replan_request(
+        "need to be at pharmacy by 5pm",
+        [{"id": "pharmacy-1", "title": "Pharmacy", "duration_minutes": 30}],
+        "Asia/Kolkata",
+        {"date": "2026-10-12"},
+    )
+
+    assert result["updates"] == {
+        "pharmacy-1": {"latest_start": "2026-10-12T17:00:00+05:30"}
+    }
+    assert result["source"] == "explicit_rule"
+
+
+def test_mantle_parses_natural_language_replan_updates(monkeypatch):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from app import integrations
+
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=(
+                '{"updates":{"stop-pharmacy":{"fixed_start":"2026-10-12T16:00:00+05:30"}},'
+                '"stop_order":null,"optimize_route":false,"clarification_question":null}'
+            )))])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    stops = [{"id": "stop-pharmacy", "title": "Pharmacy", "duration_minutes": 30}]
+
+    result = integrations.parse_replan_request("Move the pharmacy to 4 pm", stops, "Asia/Kolkata", {"date": "2026-10-12"})
+
+    assert result["updates"] == {"stop-pharmacy": {"fixed_start": "2026-10-12T16:00:00+05:30"}}
+    assert result["clarification_question"] is None
+    assert result["source"] == "mantle"
+    assert "stop-pharmacy" in captured["request"]["messages"][1]["content"]
+
+
+def test_mantle_replan_parser_recovers_from_unknown_stop_ids(monkeypatch):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from app import integrations
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=(
+                '{"updates":{"not-a-stop":{"duration_minutes":60}},"optimize_route":false,"clarification_question":null}'
+            )))])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    result=integrations.parse_replan_request("Make the stop longer", [{"id": "stop-1", "title": "Pharmacy", "duration_minutes": 30}])
+    assert result["source"] == "local_fallback"
+    assert result["clarification_question"]
 
 
 def test_parse_intent_uses_bedrock_mantle_openai_client(monkeypatch):
@@ -245,3 +406,101 @@ def test_explicit_place_search_does_not_require_clarification(monkeypatch):
     assert result["operation"] == "add_destination"
     assert result["destination_query"] == "pharmacy near Chennai Central"
     assert result["clarification_needed"] is False
+
+
+def test_task_extraction_uses_mantle_and_marks_its_source(monkeypatch):
+    from pydantic import SecretStr
+    from app import integrations
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=(
+                '{"tasks":[{"title":"Grocery store","destination_query":"grocery store",'
+                '"duration_minutes":null},{"title":"Pharmacy","destination_query":"pharmacy",'
+                '"duration_minutes":null}],"clarification_question":null}'
+            )))])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    result = extract_tasks("I need to visit the grocery store and the pharmacy", "2026-10-12", "Asia/Kolkata")
+
+    assert result["extraction_source"] == "mantle"
+    assert [task["destination_query"] for task in result["tasks"]] == ["grocery store", "pharmacy"]
+
+
+def test_task_extraction_marks_local_fallback_when_mantle_returns_invalid_json(monkeypatch):
+    from pydantic import SecretStr
+    from app import integrations
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))])
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr(integrations.settings, "openai_api_key", SecretStr("not-a-real-key"))
+    monkeypatch.setattr(integrations.settings, "openai_base_url", "https://mantle.example/v1")
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    result=extract_tasks("I need to visit the grocery store and the pharmacy", "2026-10-12", "Asia/Kolkata")
+    assert result["extraction_source"] == "local_fallback"
+    assert result["fallback_reason"] == "mantle_response_invalid"
+    assert [task["destination_query"] for task in result["tasks"]] == ["grocery store", "pharmacy"]
+
+
+def test_route_place_search_ranks_by_actual_route_detour(monkeypatch):
+    from app import integrations
+
+    monkeypatch.setattr(integrations.settings, "aws_integrations_enabled", True)
+    candidates = [
+        {"id": "far", "title": "Far shop", "label": "Far shop", "latitude": 2, "longitude": 2},
+        {"id": "near", "title": "Near shop", "label": "Near shop", "latitude": 1, "longitude": 1},
+    ]
+    monkeypatch.setattr(integrations, "search_places", lambda query, bias, max_results: candidates)
+
+    class FakeProvider:
+        def leg(self, origin, destination, mode):
+            assert mode == "Car"
+            if destination["latitude"] == 0:
+                return SimpleNamespace(distance_km=10 if origin["latitude"] == 0 else 5 if origin["latitude"] == 1 else 4)
+            return SimpleNamespace(distance_km=3 if destination["latitude"] == 1 else 8)
+
+    monkeypatch.setattr(integrations, "TravelProvider", FakeProvider)
+    start = {"latitude": 0, "longitude": 0}
+    end = {"latitude": 0, "longitude": 10}
+
+    result = search_places_on_route("grocery store", start, end, "Car", 2)
+
+    assert [place["id"] for place in result] == ["near", "far"]
+    assert result[0]["detour_km"] == 0
+    assert result[0]["route_rank"] == 1
+
+
+def test_route_place_search_endpoint_returns_candidates(client, monkeypatch):
+    from app import main
+
+    def fake_search(query, start, end, mode, limit):
+        assert query == "pharmacy"
+        assert start["latitude"] == 13.0
+        assert end["longitude"] == 80.3
+        assert mode == "Walking"
+        assert limit == 3
+        return [{"id": "place-1", "detour_km": 0.7, "route_rank": 1}]
+
+    monkeypatch.setattr(main, "search_places_on_route", fake_search)
+    response = client.post("/v1/places/route-search", json={
+        "query": "pharmacy",
+        "start_location": {"latitude": 13.0, "longitude": 80.2},
+        "end_location": {"latitude": 13.1, "longitude": 80.3},
+    })
+
+    assert response.status_code == 200
+    assert response.json()["places"][0]["id"] == "place-1"

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy import update
@@ -15,7 +16,9 @@ TRAVEL_MODES = {"walking": "Walking", "bicycle": "Bicycle", "car": "Car"}
 def uid(): return str(uuid4())
 
 def stop_dict(s, index):
-    return {"id":s["id"],"title":s["title"],"type":s.get("type","errand"),"location":s["location"],"duration_minutes":s["duration_minutes"],"earliest_start":s.get("earliest_start"),"latest_start":s.get("latest_start"),"latest_end":s.get("latest_end"),"fixed_start":s.get("fixed_start"),"opening_hours":s.get("opening_hours"),"priority":s.get("priority",3),"mandatory":s.get("mandatory",False),"status":s.get("status","planned"),"source":s.get("source","user"),"attributes":s.get("attributes",{}),"order_index":index}
+    def iso(value):
+        return value.isoformat() if isinstance(value,datetime) else value
+    return {"id":s["id"],"title":s["title"],"type":s.get("type","errand"),"location":s["location"],"duration_minutes":s["duration_minutes"],"earliest_start":iso(s.get("earliest_start")),"latest_start":iso(s.get("latest_start")),"latest_end":iso(s.get("latest_end")),"fixed_start":iso(s.get("fixed_start")),"opening_hours":s.get("opening_hours"),"priority":s.get("priority",3),"mandatory":s.get("mandatory",False),"status":s.get("status","planned"),"source":s.get("source","user"),"attributes":s.get("attributes",{}),"order_index":index}
 
 def row_stop(row):
     return {"id":row.id,"title":row.title,"type":row.type,"location":row.location,"duration_minutes":row.duration_minutes,"earliest_start":row.earliest_start.isoformat() if row.earliest_start else None,"latest_start":row.latest_start.isoformat() if row.latest_start else None,"latest_end":row.latest_end.isoformat() if row.latest_end else None,"fixed_start":row.fixed_start.isoformat() if row.fixed_start else None,"opening_hours":row.opening_hours,"priority":row.priority,"mandatory":row.mandatory,"status":row.status,"source":row.source,"attributes":row.attributes or {}}
@@ -102,7 +105,7 @@ def preview_schedule(db,req, max_candidate_evaluations=500):
     if estimate_source=="local_mock":
         facts.append("Travel times and distances are local development estimates, not live route results.")
     if result["search_truncated"]:
-        facts.append("The itinerary search reached its evaluation limit; a larger search budget may find a better order.")
+        facts.append("The itinerary uses bounded search; another stop order may produce a shorter route.")
     metrics_after=result.get("metrics",{}).get("after")
     return {"feasible":result["feasible"],"stops":result["stops"],"timeline":(metrics_after or {}).get("timeline",[]),"metrics":metrics_after,"conflicts":result["conflicts"],"explanation_facts":facts,"evaluated_orders":result["evaluated_orders"],"search_truncated":result["search_truncated"],"travel_estimate_source":estimate_source}
 
@@ -138,7 +141,21 @@ def make_plan_request(db,s,existing,candidates,constraints,allow_reorder,max_reo
     stored=db.scalars(select(models.ScheduleConstraint).where(models.ScheduleConstraint.schedule_id==s.id)).all()
     cs=[{"type":c.type,"hardness":c.hardness,"weight":c.weight,"parameters":c.parameters or {}} for c in stored]
     cs += [c.model_dump() for c in constraints]
-    return {"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":existing,"candidate_stops":candidates,"constraints":cs,"allow_reordering_flexible_stops":allow_reorder,"max_reordered_stops":max_reorder,"max_candidate_evaluations":500,"preferred_travel_mode":user_travel_mode(db,s.user_id),"weights":{"travel_time":5,"distance":1,"disruption":4}}
+    zone=ZoneInfo(s.timezone or "UTC")
+    def local_datetime(value):
+        if value is None:
+            return None
+        parsed=value if isinstance(value,datetime) else datetime.fromisoformat(value)
+        return parsed.replace(tzinfo=zone) if parsed.tzinfo is None else parsed
+    start_at=local_datetime(s.start_at)
+    end_at=local_datetime(s.end_at)
+    prepared=[]
+    for stop in existing:
+        normalized=dict(stop)
+        for field in ("earliest_start","latest_start","latest_end","fixed_start"):
+            normalized[field]=local_datetime(stop.get(field))
+        prepared.append(normalized)
+    return {"start_at":start_at,"end_at":end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":prepared,"candidate_stops":candidates,"constraints":cs,"allow_reordering_flexible_stops":allow_reorder,"max_reordered_stops":max_reorder,"max_candidate_evaluations":500,"preferred_travel_mode":user_travel_mode(db,s.user_id),"weights":{"travel_time":5,"distance":1,"disruption":4}}
 
 def save_proposal(db,s,user_id,operation,result):
     p=models.Proposal(id=uid(),schedule_id=s.id,user_id=user_id,base_revision=s.current_revision,status="pending" if result["feasible"] else "infeasible",operation=operation,proposed_stops=[stop_dict(x,i) for i,x in enumerate(result["stops"])],metrics=result["metrics"],conflicts=result["conflicts"],explanation_facts=result["explanation_facts"],created_at=datetime.now(timezone.utc),expires_at=datetime.now(timezone.utc)+timedelta(minutes=settings.proposal_ttl_minutes))
@@ -160,6 +177,11 @@ def replan(db,sid,req:ReplanRequest):
     s=get_schedule(db,sid,req.user_id)
     rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==sid).order_by(models.Stop.order_index)).all()
     existing=[row_stop(x) for x in rows]
+    if req.stop_order is not None:
+        existing_by_id = {stop["id"]: stop for stop in existing}
+        if len(req.stop_order) != len(existing) or set(req.stop_order) != set(existing_by_id):
+            raise HTTPException(422,"stop_order must contain every existing stop id exactly once")
+        existing = [existing_by_id[stop_id] for stop_id in req.stop_order]
     for sid2,updates in req.updates.items():
         found=next((x for x in existing if x["id"]==sid2),None)
         if not found: raise HTTPException(422,f"Unknown stop id: {sid2}")
@@ -168,8 +190,12 @@ def replan(db,sid,req:ReplanRequest):
             if k not in allowed: raise HTTPException(422,f"Unsupported update field: {k}")
             found[k]=v.isoformat() if isinstance(v,datetime) else v
     r=make_plan_request(db,s,existing,[],req.constraints,req.allow_reordering_flexible_stops,req.max_reordered_stops)
+    if req.stop_order is not None:
+        r["allow_reordering_flexible_stops"] = False
     try:
-        result=plan(r,TravelProvider(),r["preferred_travel_mode"])
+        provider=TravelProvider()
+        result=(plan(r,provider,r["preferred_travel_mode"]) if req.stop_order is not None
+                else optimize_schedule(r,provider,r["preferred_travel_mode"]))
     except Exception as exc:
         raise HTTPException(502,"Travel provider failed to calculate a route") from exc
     return save_proposal(db,s,req.user_id,"replan",result)
@@ -197,15 +223,16 @@ def approve(db,p,req):
         latest=db.scalar(select(models.Proposal).where(models.Proposal.id==p.id).with_for_update())
         if not latest or latest.status!="pending": raise HTTPException(409,"Proposal is no longer pending")
         from app.planner import plan
-        constraints=db.scalars(select(models.ScheduleConstraint).where(models.ScheduleConstraint.schedule_id==s.id)).all()
         current_rows=db.scalars(select(models.Stop).where(models.Stop.schedule_id==s.id).order_by(models.Stop.order_index)).all()
         existing=[row_stop(x) for x in current_rows]
         proposed=p.proposed_stops
         # Revalidate against current persisted constraints and travel estimates immediately before commit.
         mode=user_travel_mode(db,req.user_id)
-        validation=plan({"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":existing,"candidate_stops":[],"constraints":[{"type":c.type,"hardness":c.hardness,"parameters":c.parameters or {}} for c in constraints]},TravelProvider(),mode)
+        validation_request=make_plan_request(db,s,existing,[],[],False,0)
+        validation=plan(validation_request,TravelProvider(),mode)
         if not validation["feasible"]: raise HTTPException(409,"Current schedule is no longer feasible")
-        proposed_validation=plan({"start_at":s.start_at,"end_at":s.end_at,"start_location":s.start_location,"end_location":s.end_location,"existing_stops":proposed,"candidate_stops":[],"constraints":[{"type":c.type,"hardness":c.hardness,"parameters":c.parameters or {}} for c in constraints]},TravelProvider(),mode)
+        proposed_request={**validation_request,"existing_stops":proposed}
+        proposed_validation=plan(proposed_request,TravelProvider(),mode)
         if not proposed_validation["feasible"]: raise HTTPException(409,"Proposed schedule failed validation")
         p.idempotency_key=req.idempotency_key
         s.current_revision=p.base_revision+1

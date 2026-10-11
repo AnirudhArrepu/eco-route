@@ -13,7 +13,7 @@ export default function SchedulePreview({ preview, body }) {
     <PlanConflicts conflicts={preview.conflicts} />
     <Timeline stops={preview.stops} timeline={preview.timeline} metrics={preview.metrics} timezone={body.timezone} schedule={body} />
     <div className="notice text-xs text-neutral-500"><p>{preview.travel_estimate_source === 'local_mock' ? 'Local development travel estimates. These are not live route results.' : 'Travel times are estimates and may change.'}</p>
-      {preview.search_truncated && <p className="mt-2">The search reached its evaluation limit. This is the best feasible order found within that budget.</p>}
+      {preview.search_truncated && <p className="mt-2">The itinerary search is bounded, so another stop order may be shorter.</p>}
       {preview.explanation_facts?.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-4">{preview.explanation_facts.map((fact, i) => <li key={i}>{fact}</li>)}</ul>}
     </div>
   </div>

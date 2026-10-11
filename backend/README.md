@@ -48,13 +48,14 @@ they do not require IAM permissions on the API role.
 For a Lambda and API Gateway deployment, package the API with `infra/lambda-requirements.txt` and
 set the Lambda handler to `app.lambda_handler.handler`. This API Lambda is separate from the
 Step Functions worker handler `app.workflow_worker.lambda_handler`.
-Deploy backend code updates to the API Lambda with `./scripts/deploy_backend.ps1` from PowerShell
+Deploy backend code updates to the API and workflow Lambdas with `./scripts/deploy_backend.ps1` from PowerShell
 (or `powershell -ExecutionPolicy Bypass -File .\scripts\deploy_backend.ps1`). The script verifies
 the AWS account and Lambda runtime/architecture, builds a Python 3.12 x86_64 package from the
-requirements file, updates the function, and waits for AWS to report the update complete. It
-defaults to account `265134560414`, region `ap-south-1`, and function `ecoroute-api-286936`; pass
-`-Profile`, `-Region`, or `-FunctionName` to override the target. It removes its temporary package
-and archive when it finishes.
+requirements file, updates both functions, and waits for AWS to report each update complete. It
+defaults to account `265134560414`, region `ap-south-1`, and functions `ecoroute-api-286936` and
+`ecoroute-workflow-286936`; pass `-Profile`, `-Region`, `-FunctionName` (one function), or
+`-FunctionNames` (a list) to choose a target. It removes its temporary package and archive when it
+finishes.
 The planner served from `web/` lets you save the API Gateway base URL in the browser after the
 static files are uploaded to Amplify. Configure API Gateway CORS to allow all origins, methods,
 and headers as well; the FastAPI CORS middleware cannot answer preflight requests intercepted by
@@ -113,6 +114,8 @@ permissions or resources. Local API and planner tests run with `python -m pytest
 - `POST /v1/schedules/preview`
 - `POST /v1/schedules`
 - `GET /v1/places/search?query=...&latitude=...&longitude=...`
+- `POST /v1/places/route-search` with `query`, `start_location`, and `end_location`; returns up to three matching places ranked by routed detour
+- `POST /v1/agent/extract-tasks` with `text`, `date`, and `timezone`
 - `GET /v1/schedules/{id}?user_id=...`
 - `GET /v1/schedules/{id}/timeline?user_id=...`
 - `POST /v1/schedules/{id}/stops?user_id=...`
@@ -132,3 +135,26 @@ permissions or resources. Local API and planner tests run with `python -m pytest
 - `DELETE /v1/routines/{routine_id}?user_id=...`
 - `GET /ready`
 - `GET /v1/workflows/status?execution_arn=...&user_id=...`
+
+Route-aware place search accepts this body:
+
+```json
+{
+  "query": "grocery store",
+  "start_location": { "latitude": 13.0827, "longitude": 80.2707 },
+  "end_location": { "latitude": 13.0569, "longitude": 80.2425 },
+  "max_results": 3
+}
+```
+
+The response is `{ "places": [...] }`. Each place includes its coordinates, `route_km`,
+`detour_km`, and `route_rank`. The picker preselects the lowest-detour result, while the user
+can choose another candidate or search for a different place. The schedule preview then optimizes
+the order of all selected stops together.
+
+Schedule metrics include an estimated direct tailpipe CO2 scenario alongside route kilometres. In
+Car mode, the estimate uses 0.140 kg CO2 per vehicle-kilometre for a gasoline hatchback under 1,400
+cc, including the 8% uplift factor from the 2015 India-specific road transport factor study. Walking
+and Bicycle modes assume zero direct tailpipe CO2. This is a comparison scenario, not a vehicle
+specific or lifecycle emissions measurement; the API includes the factor and source URL with the
+distance savings metric.

@@ -78,7 +78,7 @@ export default function PlannerPage() {
     <fieldset disabled={busy} className="mt-8 min-w-0">
       {step < 2 && <ScheduleForm step={step} draft={draft} onChange={change} />}
       {step === 2 && <div className="grid gap-4">
-        <TaskExtractionPanel text={requestText} onTextChange={setRequestText} date={draft.date} timezone={draft.timezone} bias={draft.startPlace} onAdd={addExtractedStop} />
+        <TaskExtractionPanel text={requestText} onTextChange={setRequestText} date={draft.date} timezone={draft.timezone} startPlace={draft.startPlace} endPlace={draft.returnToStart ? draft.startPlace : draft.endPlace} onAdd={addExtractedStop} />
         {draft.stops.map((stop, index) => <StopCard key={stop.id} stop={stop} index={index} onEdit={() => { setEditing(stop); setShowStopForm(true) }} onRemove={() => change({ stops: draft.stops.filter(item => item.id !== stop.id) })} />)}
         {showStopForm ? <div className="rounded-xl border border-neutral-200 p-4 sm:p-6"><h2 className="mb-5 font-semibold">{editing ? 'Adjust this stop' : 'One more thing to do'}</h2><StopForm key={editing?.id || 'new'} initial={editing} date={draft.date} timezone={draft.timezone} bias={draft.startPlace}
           onSubmit={storeStop} onCancel={() => { setEditing(null); setShowStopForm(false) }} /></div>
